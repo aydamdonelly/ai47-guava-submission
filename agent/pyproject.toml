@@ -1,0 +1,19 @@
+[project]
+name = "caresignal-guava-agent"
+version = "0.1.0"
+description = "Guava voice intake agent for the CareSignal hackathon demo"
+requires-python = ">=3.10"
+dependencies = [
+    "guava-sdk==0.40.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.0",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

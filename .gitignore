@@ -1,0 +1,15 @@
+.DS_Store
+.env
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+agent/.venv/
+agent/fallback_intakes.jsonl
+web/dist/
+web/node_modules/
+web/*.tsbuildinfo
