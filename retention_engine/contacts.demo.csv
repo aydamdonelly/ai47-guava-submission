@@ -1,0 +1,5 @@
+contact_id,first_name,phone_e164,trigger,plan,baseline_weekly_events,recent_weekly_events,locale,consent_to_call,do_not_call
+demo-dropoff,Jordan,+12025550101,usage_drop,Annual Pro,18,4,en-US,true,false
+demo-cancelled,Taylor,+12025550102,cancellation,Monthly Pro,12,0,en-US,false,false
+demo-dnc,Casey,+12025550103,usage_drop,Annual Pro,20,2,en-US,true,true
+demo-lapsed,Riley,+12025550104,usage_drop,Free,9,1,en-US,false,false

@@ -10,6 +10,7 @@ __pycache__/
 *.db-wal
 agent/.venv/
 agent/fallback_intakes.jsonl
+retention_engine/data/
 web/dist/
 web/node_modules/
 web/*.tsbuildinfo
