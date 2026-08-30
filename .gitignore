@@ -8,6 +8,7 @@ __pycache__/
 *.db
 *.db-shm
 *.db-wal
+*.sqlite3
 agent/.venv/
 agent/fallback_intakes.jsonl
 retention_engine/data/

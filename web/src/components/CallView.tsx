@@ -5,12 +5,12 @@ import {
   CircleStop,
   Mail,
   PhoneCall,
-  RotateCcw,
   X,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import { startCall } from "../lib/callAdapter";
+import type { LiveWorkflowRule } from "../lib/callAdapter";
 import { cn } from "../lib/cn";
 import { sendRetentionEmail } from "../lib/emailAdapter";
 import type {
@@ -29,6 +29,7 @@ interface CallViewProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onEvent?: (event: CallEvent) => void;
+  workflowRule?: LiveWorkflowRule;
 }
 
 const stateLabels = {
@@ -55,16 +56,13 @@ const goalLabels: Record<Customer["goal"], string> = {
   build_muscle: "Gain muscle / nutrition targets",
 };
 
-const PLAYBACK_SCALE = 0.42;
-
 function formatTimer(milliseconds: number) {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProps) {
+export function CallView({ customer, open, onOpenChange, onEvent, workflowRule }: CallViewProps) {
   const reduceMotion = useReducedMotion();
-  const [runId, setRunId] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [transcript, setTranscript] = useState<TranscriptLine[]>([]);
   const [state, setState] = useState<CallStateSnapshot | null>(null);
@@ -96,7 +94,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
     setFeedback("");
 
     const timer = window.setInterval(() => {
-      if (!disposed) setElapsedMs((Date.now() - startedAt) / PLAYBACK_SCALE);
+      if (!disposed) setElapsedMs(Date.now() - startedAt);
     }, 250);
     timerRef.current = timer;
 
@@ -128,7 +126,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
         setMetrics(event.metrics);
         setFeedback("Call completed and insight saved.");
       }
-    });
+    }, { workflowRule });
 
     simulationRef.current = simulation;
     void simulation.finished.finally(() => {
@@ -143,7 +141,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
       simulation.stop();
       simulationRef.current = null;
     };
-  }, [customer, onEvent, open, runId, workflow]);
+  }, [customer, onEvent, open, workflow, workflowRule]);
 
   const emailAction = [...actions]
     .reverse()
@@ -176,7 +174,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
     simulationRef.current = null;
     if (timerRef.current !== null) window.clearInterval(timerRef.current);
     timerRef.current = null;
-    setFeedback("Simulation ended. No external call was placed.");
+    setFeedback("Live monitoring closed. The Guava call continues on the phone.");
   }
 
   const duration = reduceMotion ? 0 : 0.18;
@@ -215,7 +213,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
                       </Dialog.Title>
                     </div>
                     <Dialog.Description className="mt-0.5 truncate text-pretty text-xs text-slate-500">
-                      Simulated playback of {workflow.title}
+                      Live Guava call · {workflow.title}
                     </Dialog.Description>
                   </div>
                   <div className="flex items-center gap-2">
@@ -294,7 +292,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
                       ) : (
                         <div className="flex min-h-48 flex-col items-center justify-center text-center">
                           <PhoneCall aria-hidden="true" className="size-7 text-slate-300" />
-                          <p className="mt-3 text-pretty text-sm text-slate-500">Connecting the simulated call…</p>
+                          <p className="mt-3 text-pretty text-sm text-slate-500">Guava is connecting the live call…</p>
                         </div>
                       )}
                     </div>
@@ -378,7 +376,7 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
 
                 <footer className="flex flex-col gap-3 border-t border-slate-200 bg-white px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <p className="min-h-5 text-pretty text-xs text-slate-600" aria-live="polite">
-                    {feedback || "Simulation only — no external phone call is placed."}
+                    {feedback || "Calling the authorized stored number through Guava."}
                   </p>
                   <div className="flex shrink-0 gap-2">
                     {emailAction ? (
@@ -398,19 +396,13 @@ export function CallView({ customer, open, onOpenChange, onEvent }: CallViewProp
                       type="button"
                       whileTap={reduceMotion ? undefined : { scale: 0.98 }}
                       transition={{ duration: 0.12 }}
-                      onClick={() => setRunId((value) => value + 1)}
-                      className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-                    >
-                      <RotateCcw aria-hidden="true" className="size-3.5" /> Replay
-                    </motion.button>
-                    <motion.button
-                      type="button"
-                      whileTap={reduceMotion ? undefined : { scale: 0.98 }}
-                      transition={{ duration: 0.12 }}
-                      onClick={handleStop}
+                      onClick={() => {
+                        handleStop();
+                        onOpenChange(false);
+                      }}
                       className="inline-flex h-9 items-center gap-2 rounded-lg bg-slate-950 px-3 text-xs font-semibold text-white hover:bg-slate-800 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
                     >
-                      <CircleStop aria-hidden="true" className="size-3.5" /> End simulation
+                      <CircleStop aria-hidden="true" className="size-3.5" /> Close monitor
                     </motion.button>
                   </div>
                 </footer>

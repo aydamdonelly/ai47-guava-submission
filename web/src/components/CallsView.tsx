@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock3, Play, Voicemail } from "lucide-react";
+import { CheckCircle2, Clock3, PhoneCall, Voicemail } from "lucide-react";
 import { motion } from "motion/react";
 
 const calls = [
@@ -10,7 +10,28 @@ const calls = [
   ["Leila Haddad", "Completed", "Low perceived value", "Re-onboarding sent", "5:17", "3 hrs ago"],
 ];
 
-export function CallsView({ onReplay }: { onReplay: () => void }) {
+export interface LiveCallRecord {
+  name: string;
+  status: "In progress" | "Completed" | "Failed";
+  branch: string;
+  outcome: string;
+  duration: string;
+  started: string;
+}
+
+export function CallsView({
+  onStartCall,
+  latestCall,
+}: {
+  onStartCall: () => void;
+  latestCall?: LiveCallRecord;
+}) {
+  const visibleCalls = latestCall
+    ? [[latestCall.name, latestCall.status, latestCall.branch, latestCall.outcome, latestCall.duration, latestCall.started], ...calls]
+    : calls;
+  const callCount = latestCall ? 39 : 38;
+  const completedCount = latestCall?.status === "Completed" ? 30 : 29;
+
   return (
     <motion.main
       initial={{ opacity: 0, y: 6 }}
@@ -29,18 +50,18 @@ export function CallsView({ onReplay }: { onReplay: () => void }) {
           </div>
           <button
             type="button"
-            onClick={onReplay}
-            className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800"
+            onClick={onStartCall}
+            className="inline-flex items-center gap-2 rounded-lg bg-slate-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2"
           >
-            <Play aria-hidden="true" className="size-4" />
-            Replay demo call
+            <PhoneCall aria-hidden="true" className="size-4" />
+            Call sample customer
           </button>
         </div>
 
         <div className="mt-7 grid grid-cols-3 overflow-hidden rounded-xl border border-slate-200 bg-white">
           {[
-            ["Calls today", "38"],
-            ["Completed", "29"],
+            ["Calls today", String(callCount)],
+            ["Completed", String(completedCount)],
             ["Average duration", "4:21"],
           ].map(([label, value], index) => (
             <div key={label} className={index ? "border-l border-slate-200 p-5" : "p-5"}>
@@ -59,9 +80,9 @@ export function CallsView({ onReplay }: { onReplay: () => void }) {
             <span>Duration</span>
             <span>Started</span>
           </div>
-          {calls.map(([name, status, branch, outcome, duration, started]) => (
+          {visibleCalls.map(([name, status, branch, outcome, duration, started], index) => (
             <article
-              key={name}
+              key={`${name}-${started}-${index}`}
               className="grid grid-cols-[minmax(0,1.4fr)_0.8fr_1fr_1.2fr_0.5fr_0.7fr] items-center gap-4 border-b border-slate-100 px-5 py-4 text-sm last:border-0 hover:bg-slate-50"
             >
               <div className="flex min-w-0 items-center gap-3">

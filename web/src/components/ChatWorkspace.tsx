@@ -1,6 +1,8 @@
-import { ArrowRight, ArrowUp, Check, Sparkles } from "lucide-react";
+import { ArrowRight, ArrowUp, Check, CheckCircle2, Circle, PhoneCall, Sparkles } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { FormEvent, useState } from "react";
+import { cn } from "../lib/cn";
+import type { Customer } from "../product/types";
 import type { WorkflowId } from "./Sidebar";
 
 const analyses: Array<{ id: WorkflowId; label: string }> = [
@@ -8,6 +10,19 @@ const analyses: Array<{ id: WorkflowId; label: string }> = [
   { id: "love", label: "Why do customers love Smartset?" },
   { id: "reactivate", label: "Bring inactive users back" },
 ];
+
+export type WorkflowRunStage = "start" | "select_users" | "calling";
+
+const runStages: ReadonlyArray<{ id: WorkflowRunStage; label: string }> = [
+  { id: "start", label: "Start" },
+  { id: "select_users", label: "Select users" },
+  { id: "calling", label: "Start calling" },
+];
+
+function maskedPhone(phone: string) {
+  const lastFour = phone.replace(/\D/g, "").slice(-4);
+  return lastFour ? `••• ••• ${lastFour}` : "No stored phone";
+}
 
 export function ChatWorkspace({
   workflowId,
@@ -18,6 +33,10 @@ export function ChatWorkspace({
   onWorkflowSelect,
   onCommand,
   onFollowUp,
+  stage,
+  onStageChange,
+  selectedTestCustomer,
+  onCall,
 }: {
   workflowId: WorkflowId;
   request: string;
@@ -27,8 +46,13 @@ export function ChatWorkspace({
   onWorkflowSelect: (id: WorkflowId) => void;
   onCommand: (command: string) => void;
   onFollowUp: (index: number) => void;
+  stage: WorkflowRunStage;
+  onStageChange: (stage: WorkflowRunStage) => void;
+  selectedTestCustomer: Customer | null;
+  onCall: (customer: Customer) => void;
 }) {
   const [input, setInput] = useState("");
+  const activeStageIndex = runStages.findIndex((item) => item.id === stage);
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -93,6 +117,71 @@ export function ChatWorkspace({
               </span>
               <div className="min-w-0 flex-1">
                 <p className="text-pretty text-[15px] leading-7 text-slate-800">{response}</p>
+
+                <section aria-labelledby="run-workflow-title" className="mt-6 rounded-xl border border-slate-200 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 id="run-workflow-title" className="text-sm font-semibold text-slate-950">
+                      Run workflow
+                    </h2>
+                    <span className="text-xs text-slate-500">Test cohort</span>
+                  </div>
+                  <ol className="mt-3 grid grid-cols-3 gap-2">
+                    {runStages.map((item, index) => {
+                      const completed = index < activeStageIndex;
+                      const active = item.id === stage;
+                      return (
+                        <li key={item.id}>
+                          <button
+                            type="button"
+                            onClick={() => onStageChange(item.id)}
+                            aria-current={active ? "step" : undefined}
+                            className={cn(
+                              "flex min-h-10 w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600",
+                              completed && "border-emerald-200 bg-emerald-50 text-emerald-800",
+                              active && "border-emerald-500 bg-emerald-50 text-emerald-900",
+                              !completed && !active && "border-slate-200 text-slate-500 hover:border-slate-300",
+                            )}
+                          >
+                            {completed ? (
+                              <CheckCircle2 aria-hidden="true" className="size-4 shrink-0 text-emerald-600" />
+                            ) : (
+                              <Circle
+                                aria-hidden="true"
+                                className={cn("size-4 shrink-0", active ? "fill-emerald-600 text-emerald-600" : "text-slate-300")}
+                              />
+                            )}
+                            <span className="truncate">{item.label}</span>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ol>
+
+                  {stage === "calling" && selectedTestCustomer && (
+                    <div className="mt-3 flex items-center gap-3 rounded-lg bg-slate-50 px-3 py-2.5">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-white text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
+                        {selectedTestCustomer.initials}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-slate-900">
+                          {selectedTestCustomer.name}
+                        </span>
+                        <span className="block truncate text-xs tabular-nums text-slate-500">
+                          Stored phone · {maskedPhone(selectedTestCustomer.phone)}
+                        </span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => onCall(selectedTestCustomer)}
+                        className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-slate-950 px-3 py-2 text-xs font-medium text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
+                      >
+                        <PhoneCall aria-hidden="true" className="size-3.5" />
+                        Live call
+                      </button>
+                    </div>
+                  )}
+                </section>
+
                 <p className="mt-7 text-sm font-medium text-slate-500">Suggested follow-ups</p>
                 <div className="mt-2 divide-y divide-slate-100 border-y border-slate-100">
                   {followUps.map((followUp, index) => (

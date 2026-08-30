@@ -75,7 +75,7 @@ export const churnWorkflow: Workflow = {
     node("value", "branch", "Low perceived value", "Locate the missing activation moment", ["Understand intended outcome", "Personalized re-onboarding"]),
     node("alternative", "branch", "Switched to alternative", "Capture what the competitor does better", ["Name competitor", "Recover only with credible advantage"]),
     node("product_followup", "question", "Diagnose exact issue", "Known fix, support case, or product insight", ["No discount on a broken product"]),
-    node("price_causal", "branch", "Would lower price change intent?", "Yes: offer · No: return to discovery", ["Free month only if price is causal"]),
+    node("price_causal", "branch", "Would lower price change intent?", "Validate whether price is truly causal", ["No incentive configured", "Return to discovery when price is a symptom"]),
     node("deeper_discovery", "question", "Deeper root-cause discovery", "Price was a symptom, not the reason", ["Recursive branch", "Ask one focused follow-up"]),
     node("restart", "action", "Create restart plan", "Send Smartset deep-link and reminder", ["Personalized to original goal"]),
     node("support", "action", "Solve or escalate", "Explain known fix or create support issue", ["Structured issue attached to call"]),

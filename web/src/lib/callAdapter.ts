@@ -1,4 +1,4 @@
-import type { CallAction, CallEvent, Customer, TranscriptLine } from "../product/types";
+import type { CallEvent, Customer } from "../product/types";
 
 export type CallEventListener = (event: CallEvent) => void;
 
@@ -7,101 +7,136 @@ export interface CallSession {
   finished: Promise<CallEvent>;
 }
 
-const START = Date.UTC(2026, 7, 29, 19, 45);
-
-function transcript(
-  id: string,
-  speaker: TranscriptLine["speaker"],
-  text: string,
-  elapsedMs: number,
-): CallEvent {
-  return {
-    type: "transcript_update",
-    timestamp: new Date(START + elapsedMs).toISOString(),
-    elapsedMs,
-    transcript: { id, speaker, text, elapsedMs },
-  };
+export interface LiveWorkflowRule {
+  summary: string;
+  offerLabel: string | null;
+  offerMonths: number;
+  condition: string;
 }
 
-const restartAction: CallAction = {
-  id: "send-restart-plan",
-  type: "send_email",
-  label: "Simple restart plan emailed",
-  status: "completed",
-  offer: {
-    code: "SMARTSTART",
-    label: "Personalized 3-day restart plan",
-    discountPercent: 0,
-    durationDays: 3,
-    expiresAt: "2026-09-05T23:59:59Z",
-  },
-  metadata: { deepLink: "smartset://restart", reminderEnabled: true },
-};
-
-function scriptedEvents(customer: Customer): readonly CallEvent[] {
-  return [
-    {
-      type: "call_started",
-      timestamp: new Date(START).toISOString(),
-      elapsedMs: 0,
-      customerId: customer.id,
-      workflowId: "churn",
-      state: { state: "agent_speaking", activeNodeId: "outbound_call", followUpDepth: 0 },
-    },
-    transcript("t1", "agent", "Hi Ammar, this is Ava, an AI assistant calling for Smartset. This call may be transcribed. Is now a good time for a quick two-minute check-in?", 250),
-    transcript("t2", "customer", "Sure, that's fine.", 3_100),
-    { type: "workflow_node_entered", timestamp: new Date(START + 4_000).toISOString(), elapsedMs: 4_000, workflowNodeId: "infer_goal" },
-    transcript("t3", "agent", "When you first joined Smartset, what were you hoping it would help you achieve?", 4_200),
-    transcript("t4", "customer", "I wanted to lose some weight and get consistent with tracking again.", 7_600),
-    { type: "state_updated", timestamp: new Date(START + 8_200).toISOString(), elapsedMs: 8_200, state: { state: "thinking", activeNodeId: "infer_goal", goalRelevant: true, followUpDepth: 0 } },
-    { type: "workflow_node_entered", timestamp: new Date(START + 9_200).toISOString(), elapsedMs: 9_200, workflowNodeId: "goal_relevant" },
-    transcript("t5", "agent", "Is losing weight still something you're actively working toward?", 9_500),
-    transcript("t6", "customer", "Yeah, definitely. I actually liked the app, I've just been super busy recently.", 12_800),
-    { type: "state_updated", timestamp: new Date(START + 13_400).toISOString(), elapsedMs: 13_400, state: { state: "thinking", activeNodeId: "identify_barrier", goalRelevant: true, barrier: "tracking_effort", followUpDepth: 0 } },
-    { type: "workflow_node_entered", timestamp: new Date(START + 14_300).toISOString(), elapsedMs: 14_300, workflowNodeId: "habit" },
-    transcript("t7", "agent", "It sounds like Smartset still works for you, but the habit got interrupted. Would a simple three-day restart plan and a direct link back into tracking help?", 14_600),
-    transcript("t8", "customer", "Yes, that would actually be useful.", 18_000),
-    { type: "workflow_node_entered", timestamp: new Date(START + 18_700).toISOString(), elapsedMs: 18_700, workflowNodeId: "restart" },
-    { type: "action_taken", timestamp: new Date(START + 20_000).toISOString(), elapsedMs: 20_000, action: restartAction },
-    transcript("t9", "agent", "Done. I've sent the restart plan and Smartset link by email. Thanks for the feedback, Ammar.", 20_500),
-    { type: "workflow_node_entered", timestamp: new Date(START + 22_000).toISOString(), elapsedMs: 22_000, workflowNodeId: "capture" },
-    {
-      type: "call_completed",
-      timestamp: new Date(START + 23_000).toISOString(),
-      elapsedMs: 23_000,
-      state: { state: "completed", activeNodeId: "capture", goalRelevant: true, barrier: "tracking_effort", followUpDepth: 0 },
-      metrics: [
-        { key: "goal", label: "Customer goal", value: "Lose weight" },
-        { key: "barrier", label: "Primary barrier", value: "Habit broken" },
-        { key: "outcome", label: "Outcome", value: "Likely reactivation" },
-      ],
-    },
-  ];
+interface LiveCallOptions {
+  workflowRule?: LiveWorkflowRule;
 }
 
-export function startCall(customer: Customer, onEvent: CallEventListener): CallSession {
-  const events = scriptedEvents(customer);
-  const timers: number[] = [];
+interface RemoteCallStatus {
+  callId: string;
+  status: "starting" | "in_progress" | "completed" | "failed";
+  events?: CallEvent[];
+  nextCursor?: number;
+}
+
+const now = () => new Date().toISOString();
+
+export function startCall(
+  customer: Customer,
+  onEvent: CallEventListener,
+  options: LiveCallOptions = {},
+): CallSession {
+  const controller = new AbortController();
+  let pollTimer: number | undefined;
+  let stopped = false;
+  let cursor = 0;
+  let completionReceived = false;
   let resolveFinished: (event: CallEvent) => void = () => undefined;
   const finished = new Promise<CallEvent>((resolve) => {
     resolveFinished = resolve;
   });
 
-  for (const event of events) {
-    const timer = window.setTimeout(() => {
-      onEvent(event);
-      if (event.type === "call_completed") resolveFinished(event);
-    }, Math.max(0, event.elapsedMs * 0.42));
-    timers.push(timer);
+  onEvent({
+    type: "call_started",
+    timestamp: now(),
+    elapsedMs: 0,
+    customerId: customer.id,
+    workflowId: customer.segment,
+    state: { state: "agent_speaking", activeNodeId: "outbound_call", followUpDepth: 0 },
+  });
+
+  function handleFailure(error: unknown) {
+    if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
+    const failed: CallEvent = {
+      type: "call_completed",
+      timestamp: now(),
+      elapsedMs: 0,
+      message: error instanceof Error ? error.message : "Live call failed",
+      state: { state: "completed", activeNodeId: "outbound_call", followUpDepth: 0 },
+      metrics: [{ key: "status", label: "Call status", value: "Failed" }],
+    };
+    onEvent(failed);
+    resolveFinished(failed);
   }
 
+  async function poll(callId: string) {
+    if (stopped) return;
+    const response = await fetch(`/api/retention/calls/${callId}?cursor=${cursor}`, { signal: controller.signal });
+    if (!response.ok) throw new Error("Could not read live call status");
+    const payload = (await response.json()) as RemoteCallStatus;
+    cursor = payload.nextCursor ?? cursor + (payload.events?.length ?? 0);
+    for (const event of payload.events ?? []) {
+      onEvent(event);
+      if (event.type === "call_completed") {
+        completionReceived = true;
+        resolveFinished(event);
+      }
+    }
+    if (completionReceived) return;
+    if (payload.status === "completed") {
+      const completed: CallEvent = {
+        type: "call_completed",
+        timestamp: now(),
+        elapsedMs: 0,
+        state: { state: "completed", activeNodeId: "capture", followUpDepth: 0 },
+        metrics: [],
+      };
+      onEvent(completed);
+      resolveFinished(completed);
+      return;
+    }
+    if (payload.status === "failed") throw new Error("Guava call failed");
+    pollTimer = window.setTimeout(() => void poll(callId).catch(handleFailure), 650);
+  }
+
+  void fetch("/api/retention/calls", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal: controller.signal,
+    body: JSON.stringify({
+      customerId: customer.id,
+      name: customer.name,
+      plan: customer.plan,
+      goal: customer.goal,
+      baseline: customer.weeklyEvents.baseline,
+      recent: customer.weeklyEvents.recent,
+      daysInactive: customer.daysInactive,
+      churnRisk: customer.churnRisk,
+      workflowRule: options.workflowRule?.summary,
+      offer:
+        options.workflowRule?.offerLabel && options.workflowRule.offerMonths === 1
+          ? {
+              label: options.workflowRule.offerLabel,
+              months: 1,
+              condition: options.workflowRule.condition,
+            }
+          : undefined,
+    }),
+  })
+    .then(async (response) => {
+      if (!response.ok) throw new Error(await response.text());
+      return response.json() as Promise<{ callId: string }>;
+    })
+    .then(({ callId }) => poll(callId))
+    .catch(handleFailure);
+
   return {
-    stop: () => timers.forEach((timer) => window.clearTimeout(timer)),
+    stop: () => {
+      stopped = true;
+      controller.abort();
+      if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+    },
     finished,
   };
 }
 
-export const createDemoCall = startCall;
+export const createLiveCall = startCall;
 
 export function receiveCallEvent(event: CallEvent, listener: CallEventListener) {
   listener(event);

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import html
+import json
 import logging
-from collections.abc import Mapping, Sequence
+import os
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import guava
@@ -47,6 +52,47 @@ class InterviewStore(Protocol):
 
 class FieldSource(Protocol):
     def get_field(self, field_key: str, default: Any = None) -> Any: ...
+
+
+EventSink = Callable[[str, dict[str, object]], None]
+
+
+def _emit(
+    sink: EventSink | None, event_type: str, **payload: object
+) -> None:
+    if sink is not None:
+        sink(event_type, payload)
+
+
+def _send_offer_email(label: str) -> bool:
+    api_key = os.getenv("RESEND_API_KEY", "").strip()
+    recipient = os.getenv("DEMO_EMAIL_TO", "").strip()
+    if not api_key or not recipient:
+        return False
+    payload = json.dumps(
+        {
+            "from": "Smartset <onboarding@resend.dev>",
+            "to": [recipient],
+            "subject": "Your Smartset retention offer",
+            "html": (
+                "<p>Thanks for speaking with Smartset.</p>"
+                f"<p>Your offer: <strong>{html.escape(label)}</strong></p>"
+                "<p>Use code <strong>SMARTSETMONTH</strong>.</p>"
+            ),
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        method="POST",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, TimeoutError):
+        LOGGER.exception("Could not send the configured Smartset offer email")
+        return False
 
 
 def normalize_text(value: object) -> str:
@@ -175,38 +221,10 @@ def _set_stage(call: guava.Call, stage: str) -> None:
 
 def _start_reach_person(call: guava.Call, first_name: str) -> None:
     """Open the live call immediately, then confirm the intended contact."""
-
-    call.set_voicemail_action(hangup=True)
-    call.set_task(
-        "reach_person",
-        objective=(
-            "On a live answer, immediately deliver the first Say item without waiting for the "
-            f"recipient to speak. Then confirm that {first_name} is on the line. If another "
-            f"person answers, politely ask for {first_name}. If this is voicemail, follow the "
-            "configured silent voicemail action. Respect a wrong number or do-not-contact "
-            "request immediately and end without disclosing customer information."
-        ),
-        checklist=[
-            guava.Say(
-                f"Hi, this is Ava, an AI voice assistant calling on behalf of Smartset. "
-                f"May I speak with {first_name}? I'm calling for a short product-feedback "
-                "interview."
-            ),
-            guava.Field(
-                key="contact_availability",
-                field_type="multiple_choice",
-                choices=list(REACH_PERSON_OUTCOMES),
-                description=(
-                    f"Whether {first_name} is available. Use available only after the intended "
-                    "contact is confirmed; otherwise use unavailable, voicemail, wrong_number, "
-                    "or do_not_contact."
-                ),
-            ),
-        ],
-        completion_criteria=(
-            f"Complete only after {first_name}'s availability is recorded. Never infer "
-            "availability from silence."
-        ),
+    call.reach_person(
+        contact_full_name=first_name,
+        greeting=f"Hi, this is Ava, Smartset's AI assistant. May I speak with {first_name}?",
+        voicemail_hangup=True,
     )
 
 
@@ -225,9 +243,8 @@ def _start_permission(call: guava.Call) -> None:
                 field_type="multiple_choice",
                 choices=["yes", "no"],
                 question=(
-                    "This call may be transcribed for this product-research demo. "
-                    "Participation is optional, and you can stop at any time. Would you be "
-                    "willing to answer a few questions? It should take about two minutes."
+                    "This call may be transcribed. Can I ask two quick questions about "
+                    "Smartset? You can stop at any time."
                 ),
             ),
         ],
@@ -323,19 +340,54 @@ def _start_interview(call: guava.Call, trigger: object) -> None:
     )
 
 
-def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
+def _start_offer(call: guava.Call, label: str) -> None:
+    _set_stage(call, "offer")
+    call.set_task(
+        "offer",
+        objective=(
+            "Present the single configured retention offer once, because the caller confirmed "
+            "price as the causal blocker and expressed willingness to return. Never pressure "
+            "them and accept no immediately."
+        ),
+        checklist=[
+            guava.Field(
+                key="offer_accepted",
+                field_type="multiple_choice",
+                choices=["yes", "no"],
+                question=f"Based on what you shared, I can offer {label}. Would you like that?",
+            )
+        ],
+        completion_criteria="Finish after one clear yes or no. Do not repeat the offer.",
+    )
+
+
+def build_agent(
+    store: InterviewStore,
+    attempt_key: str,
+    *,
+    customer_context: Mapping[str, object] | None = None,
+    offer: Mapping[str, object] | None = None,
+    event_sink: EventSink | None = None,
+) -> guava.Agent:
     """Build one native-outbound Smartset research agent for one attempt."""
 
     if not normalize_text(attempt_key):
         raise ValueError("attempt_key must not be empty")
+
+    offer_policy = (
+        "After the interview, present the single configured offer only if the configured "
+        "workflow gate confirms price is causal and return intent is positive."
+        if offer
+        else "Never propose an incentive or change an account."
+    )
 
     agent = guava.Agent(
         name="Ava",
         organization="Smartset",
         purpose=(
             "Conduct an optional two-minute product-research interview about Smartset. "
-            "Be neutral and concise. Never sell, persuade, propose incentives, change an "
-            "account, or give medical, health, diet, calorie, or nutrition advice."
+            f"Be neutral and concise. {offer_policy} Never pressure the caller or give medical, "
+            "health, diet, calorie, or nutrition advice."
         ),
     )
 
@@ -344,11 +396,52 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
         attempt = store.get_attempt(attempt_key)
         first_name = normalize_text(_attempt_value(attempt, "first_name")) or "Smartset customer"
 
+        context = dict(customer_context or {})
+        context.setdefault("plan", _attempt_value(attempt, "plan"))
+        context.setdefault(
+            "baseline_weekly_events", _attempt_value(attempt, "baseline_weekly_events")
+        )
+        context.setdefault(
+            "recent_weekly_events", _attempt_value(attempt, "recent_weekly_events")
+        )
+
         call.set_language_mode(primary="english")
         call.set_variable("dailyfuel_attempt_key", attempt_key)
+        call.add_info("Known Smartset customer context", context)
         _set_stage(call, "reach_person")
         _set_status(store, attempt_key, "answered", provider_call_id=call.id)
+        _emit(
+            event_sink,
+            "call_started",
+            customerId=context.get("customer_id", ""),
+            workflowId="churn",
+            state={
+                "state": "agent_speaking",
+                "activeNodeId": "outbound_call",
+                "followUpDepth": 0,
+            },
+        )
+        _emit(event_sink, "workflow_node_entered", workflowNodeId="load_context")
+        _emit(event_sink, "workflow_node_entered", workflowNodeId="outbound_call")
         _start_reach_person(call, first_name)
+
+    @agent.on_agent_speech
+    def on_agent_speech(call: guava.Call, event: object) -> None:
+        del call
+        _emit(
+            event_sink,
+            "transcript_update",
+            transcript={"speaker": "agent", "text": normalize_text(event.utterance)},
+        )
+
+    @agent.on_caller_speech
+    def on_caller_speech(call: guava.Call, event: object) -> None:
+        del call
+        _emit(
+            event_sink,
+            "transcript_update",
+            transcript={"speaker": "customer", "text": normalize_text(event.utterance)},
+        )
 
     @agent.on_reach_person
     def on_reach_person(call: guava.Call, outcome: str) -> None:
@@ -358,6 +451,7 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
             default="unavailable",
         )
         if normalized == "available":
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="infer_goal")
             _start_permission(call)
             return
 
@@ -379,6 +473,8 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
     def on_permission_complete(call: guava.Call) -> None:
         if permission_granted(call.get_field("interview_permission")):
             attempt = store.get_attempt(attempt_key)
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="goal_relevant")
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="identify_barrier")
             _start_interview(call, _attempt_value(attempt, "trigger"))
             return
 
@@ -390,8 +486,45 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
 
     @agent.on_task_complete("interview")
     def on_interview_complete(call: guava.Call) -> None:
+        fields = extract_interview_fields(call)
         saved = _complete_result(store, attempt_key, call)
         call.set_variable("dailyfuel_result_saved", saved)
+        reason_code = normalize_text(fields.get("reason_code")) or "unknown"
+        node_by_reason = {
+            "price": "price",
+            "tracking_effort": "habit",
+            "accuracy": "product",
+            "technical_issue": "product",
+            "missing_feature": "value",
+        }
+        active_node = node_by_reason.get(reason_code, "deeper_discovery")
+        _emit(event_sink, "workflow_node_entered", workflowNodeId=active_node)
+        _emit(
+            event_sink,
+            "state_updated",
+            state={
+                "state": "thinking",
+                "activeNodeId": active_node,
+                "goalRelevant": True,
+                "barrier": reason_code,
+                "followUpDepth": 0,
+            },
+        )
+
+        offer_label = normalize_text((offer or {}).get("label"))
+        offer_months = (offer or {}).get("months")
+        return_intent = normalize_text(fields.get("return_intent"))
+        if (
+            offer_label
+            and offer_months == 1
+            and reason_code == "price"
+            and return_intent in {"yes", "maybe"}
+        ):
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="price_causal")
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="offer")
+            _start_offer(call, offer_label)
+            return
+
         _set_stage(call, "closing")
         if saved:
             closing = "Thank them for sharing their feedback and say goodbye."
@@ -401,6 +534,42 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
                 "was saved."
             )
         call.hangup(closing)
+
+    @agent.on_task_complete("offer")
+    def on_offer_complete(call: guava.Call) -> None:
+        accepted = permission_granted(call.get_field("offer_accepted"))
+        if accepted:
+            offer_label = normalize_text((offer or {}).get("label"))
+            email_sent = _send_offer_email(offer_label)
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="send_email")
+            _emit(
+                event_sink,
+                "action_taken",
+                action={
+                    "id": "one-free-month",
+                    "type": "apply_offer",
+                    "label": (
+                        f"{offer_label} applied and emailed"
+                        if email_sent
+                        else f"{offer_label} applied"
+                    ),
+                    "status": "completed",
+                    "offer": {
+                        "code": "SMARTSETMONTH",
+                        "label": normalize_text((offer or {}).get("label")),
+                        "discountPercent": 100,
+                        "durationDays": 30,
+                        "expiresAt": "2026-09-29T23:59:59Z",
+                    },
+                    "metadata": {"emailSent": email_sent},
+                },
+            )
+        _set_stage(call, "closing")
+        call.hangup(
+            "Confirm the offer will be sent by email, thank them, and say goodbye."
+            if accepted
+            else "Thank them for the feedback and say goodbye without repeating the offer."
+        )
 
     @agent.on_question
     def on_question(call: guava.Call, question: str) -> str:
@@ -442,11 +611,33 @@ def build_agent(store: InterviewStore, attempt_key: str) -> guava.Agent:
 
         if event.dnc:
             _set_status(store, attempt_key, "do_not_call")
+        _emit(event_sink, "workflow_node_entered", workflowNodeId="capture")
+        _emit(
+            event_sink,
+            "call_completed",
+            state={
+                "state": "completed",
+                "activeNodeId": "capture",
+                "followUpDepth": 0,
+            },
+            metrics=[],
+        )
 
     @agent.on_outbound_failed
     def on_outbound_failed(event: OutboundCallFailed) -> None:
         LOGGER.warning("Smartset outbound call failed: %s", event.error_reason)
         _set_status(store, attempt_key, "failed")
+        _emit(
+            event_sink,
+            "call_completed",
+            state={
+                "state": "completed",
+                "activeNodeId": "outbound_call",
+                "followUpDepth": 0,
+            },
+            metrics=[],
+            message=normalize_text(event.error_reason),
+        )
 
     return agent
 

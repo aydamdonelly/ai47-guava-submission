@@ -141,7 +141,7 @@ export function AgentChecksPanel({
     <Panel
       className={className}
       title="Agent checks"
-      description="Deterministic gates evaluated before the workflow advances."
+      description="Auditable gates evaluated before the workflow advances."
       icon={<ShieldCheck aria-hidden="true" className="size-4" />}
       action={
         <span className="shrink-0 rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600 tabular-nums">

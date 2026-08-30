@@ -4,6 +4,7 @@ import {
   Heart,
   MessageSquarePlus,
   PhoneCall,
+  Plus,
   RotateCcw,
   Search,
   Users,
@@ -31,11 +32,13 @@ export function Sidebar({
   workflowId,
   onViewChange,
   onWorkflowChange,
+  onAddWorkflow,
 }: {
   view: AppView;
   workflowId: WorkflowId;
   onViewChange: (view: AppView) => void;
   onWorkflowChange: (workflow: WorkflowId) => void;
+  onAddWorkflow: () => void;
 }) {
   return (
     <aside className="flex h-dvh w-60 shrink-0 flex-col border-r border-slate-200 bg-[#fafafa] px-3 py-3">
@@ -104,6 +107,14 @@ export function Sidebar({
           </button>
         ))}
       </nav>
+      <button
+        type="button"
+        onClick={onAddWorkflow}
+        className="mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-600"
+      >
+        <Plus aria-hidden="true" className="size-4" />
+        Add workflow
+      </button>
 
       <div className="mt-auto border-t border-slate-200 pt-3">
         <div className="flex w-full items-center gap-3 rounded-lg px-2 py-2 text-left">

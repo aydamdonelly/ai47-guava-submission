@@ -13,13 +13,26 @@ from fastapi.responses import FileResponse, RedirectResponse
 from care_signal.database import Database
 from care_signal.demo import seed_demo
 from care_signal.policy import LOW_CONFIDENCE_THRESHOLD, PRIORITIES
+from care_signal.retention_calls import (
+    RetentionCallProcess,
+    ask_insights,
+    interpret_workflow,
+    start_retention_call,
+)
 from care_signal.schemas import (
     DashboardResponse,
+    InsightAnswer,
+    InsightQuestion,
     IntakeCreate,
     IntakeRecord,
     IntakeStatusUpdate,
     NoteRecord,
     NoteStatusUpdate,
+    RetentionCallAccepted,
+    RetentionCallCreate,
+    RetentionCallStatus,
+    WorkflowInterpretation,
+    WorkflowInterpretRequest,
 )
 from care_signal.service import (
     InvalidStatusTransition,
@@ -88,6 +101,7 @@ def create_app(
     )
     app.state.database = database
     app.state.frontend_dir = selected_frontend if has_frontend else None
+    app.state.retention_calls: dict[str, RetentionCallProcess] = {}
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -220,6 +234,83 @@ def create_app(
     def post_demo_seed(request: Request, reset: bool = True) -> dict[str, object]:
         seeded = seed_demo(request.app.state.database, reset=reset)
         return {"seeded": len(seeded), **dashboard(request.app.state.database)}
+
+    @app.post(
+        "/api/retention/calls",
+        response_model=RetentionCallAccepted,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def post_retention_call(
+        payload: RetentionCallCreate, request: Request
+    ) -> dict[str, str]:
+        try:
+            call_id, process = start_retention_call(payload)
+        except (OSError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        request.app.state.retention_calls[call_id] = process
+        return {"callId": call_id, "status": "starting"}
+
+    @app.get(
+        "/api/retention/calls/{call_id}",
+        response_model=RetentionCallStatus,
+    )
+    def get_retention_call(
+        call_id: str, request: Request, cursor: Annotated[int, Query(ge=0)] = 0
+    ) -> dict[str, object]:
+        process = request.app.state.retention_calls.get(call_id)
+        if process is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="retention call not found",
+            )
+        events, next_cursor = process.events(cursor)
+        return {
+            "callId": call_id,
+            "status": process.status(),
+            "events": events,
+            "nextCursor": next_cursor,
+        }
+
+    @app.post(
+        "/api/retention/workflows/interpret",
+        response_model=WorkflowInterpretation,
+    )
+    def post_workflow_interpret(
+        payload: WorkflowInterpretRequest,
+    ) -> WorkflowInterpretation:
+        try:
+            return interpret_workflow(payload.instruction)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except ConnectionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="workflow interpretation failed",
+            ) from exc
+
+    @app.post(
+        "/api/retention/insights/ask",
+        response_model=InsightAnswer,
+    )
+    def post_insight_question(payload: InsightQuestion) -> InsightAnswer:
+        try:
+            return ask_insights(payload.question)
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        except ConnectionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="insight question failed",
+            ) from exc
 
     if has_frontend and selected_frontend is not None:
 

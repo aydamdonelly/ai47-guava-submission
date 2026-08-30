@@ -3,8 +3,10 @@ import { Bot, CheckCircle2, GitBranch, PhoneCall, ShieldCheck, SlidersHorizontal
 import { AgentChecksPanel, AgentStatePanel, ChatFencerPanel, NodeDetailsPanel } from "../components/AgentInspectors";
 import type { AgentCheck, AgentState } from "../components/AgentInspectors";
 import { CallsView } from "../components/CallsView";
+import type { LiveCallRecord } from "../components/CallsView";
 import { CallView } from "../components/CallView";
 import { ChatWorkspace } from "../components/ChatWorkspace";
+import type { WorkflowRunStage } from "../components/ChatWorkspace";
 import { CustomerDrawer } from "../components/CustomerDrawer";
 import { CustomerTable } from "../components/CustomerTable";
 import { InsightsView } from "../components/InsightsView";
@@ -93,39 +95,67 @@ function DecisionEnginePanel() {
 export function RetentionApp() {
   const [view, setView] = useState<AppView>("analysis");
   const [workflowId, setWorkflowId] = useState<WorkflowId>("churn");
-  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>("identify_barrier");
-  const [activeNodeId, setActiveNodeId] = useState<string | undefined>("habit");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>("start");
+  const [activeNodeId, setActiveNodeId] = useState<string | undefined>("start");
   const [emphasizedNodeId, setEmphasizedNodeId] = useState<string | undefined>();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("state");
   const [commandConfirmation, setCommandConfirmation] = useState<string>();
+  const [workflowRule, setWorkflowRule] = useState<{
+    summary: string;
+    offerLabel: string | null;
+    offerMonths: number;
+    condition: string;
+  }>();
+  const [runStage, setRunStage] = useState<WorkflowRunStage>("start");
   const [agentState, setAgentState] = useState<AgentState>(initialState);
   const [customers, setCustomers] = useState<readonly Customer[]>(smartsetCustomers);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [callCustomer, setCallCustomer] = useState<Customer | null>(null);
   const [callOpen, setCallOpen] = useState(false);
+  const [latestCall, setLatestCall] = useState<LiveCallRecord>();
+  const [liveCallCompleted, setLiveCallCompleted] = useState(false);
 
   const workflow = useMemo<Workflow>(() => {
     const base = workflowById[workflowId];
-    if (!commandConfirmation || workflowId !== "churn") return base;
+    if (!workflowRule || workflowId !== "churn") {
+      return workflowId === "churn"
+        ? {
+            ...base,
+            nodes: base.nodes.filter((node) => node.id !== "offer"),
+            edges: base.edges.filter((edge) => edge.source !== "offer" && edge.target !== "offer"),
+          }
+        : base;
+    }
+    const offerNode = base.nodes.find((node) => node.id === "offer");
+    const hasOffer = workflowRule.offerMonths === 1 && Boolean(workflowRule.offerLabel);
     return {
       ...base,
-      nodes: base.nodes.map((node) =>
-        node.id === "price_causal"
-          ? {
-              ...node,
-              prompt: "Only offer 1 free month when price is confirmed as the root cause",
-              subtitle: "Only offer 1 free month when price is confirmed as the root cause",
-              details: [
-                ...(node.details ?? []),
-                "Natural-language rule added just now",
-                "Approved code: SMARTSET30",
-              ],
-            }
-          : node,
-      ),
+      nodes: base.nodes
+        .map((node) =>
+          node.id === "price_causal"
+            ? {
+                ...node,
+                prompt: workflowRule.condition,
+                subtitle: workflowRule.condition,
+                details: ["Added by natural-language edit", workflowRule.summary],
+              }
+            : node.id === "offer" && offerNode
+              ? {
+                  ...node,
+                  label: workflowRule.offerLabel ?? "Configured retention action",
+                  title: workflowRule.offerLabel ?? "Configured retention action",
+                  prompt: `${workflowRule.offerMonths} month offer · email after acceptance`,
+                  subtitle: `${workflowRule.offerMonths} month offer · email after acceptance`,
+                }
+              : node,
+        )
+        .filter((node) => hasOffer || node.id !== "offer"),
+      edges: hasOffer
+        ? base.edges
+        : base.edges.filter((edge) => edge.source !== "offer" && edge.target !== "offer"),
     };
-  }, [commandConfirmation, workflowId]);
+  }, [workflowId, workflowRule]);
 
   const selectedNode = workflow.nodes.find((node) => node.id === selectedNodeId) ?? null;
 
@@ -133,28 +163,39 @@ export function RetentionApp() {
     setWorkflowId(id);
     setView("analysis");
     setCommandConfirmation(undefined);
+    setWorkflowRule(undefined);
+    setRunStage("start");
     setEmphasizedNodeId(undefined);
     setActiveNodeId(undefined);
     setSelectedNodeId(workflowById[id].nodes[0]?.id);
     setInspectorTab("decision");
   }
 
-  function runCommand(command: string) {
-    const normalized = command.toLowerCase();
-    if (normalized.includes("free month") || normalized.includes("price")) {
+  async function runCommand(command: string) {
+    setCommandConfirmation("Smartset AI is updating the workflow…");
+    try {
+      const response = await fetch("/api/retention/workflows/interpret", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: command }),
+      });
+      if (!response.ok) throw new Error("Workflow AI unavailable");
+      const rule = (await response.json()) as {
+        summary: string;
+        offerLabel: string | null;
+        offerMonths: number;
+        condition: string;
+      };
       setWorkflowId("churn");
-      setCommandConfirmation(
-        "Updated the Price branch: a free month is offered only after the agent confirms that price is the actual blocker. The approved code is emailed after verbal acceptance.",
-      );
-      setEmphasizedNodeId("price_causal");
-      setSelectedNodeId("price_causal");
+      setWorkflowRule(rule);
+      setCommandConfirmation(rule.summary);
+      const changedNodeId = rule.offerMonths === 1 && rule.offerLabel ? "offer" : "price_causal";
+      setEmphasizedNodeId(changedNodeId);
+      setSelectedNodeId(changedNodeId);
       setInspectorTab("node");
-      return;
+    } catch {
+      setCommandConfirmation("The workflow AI could not apply that change. Check the local API connection and try again.");
     }
-    setCommandConfirmation(
-      `Applied “${command}” to the active workflow. The decision engine will use it on the next call.`,
-    );
-    setEmphasizedNodeId(workflow.nodes[0]?.id);
   }
 
   function openCustomer(customer: Customer) {
@@ -173,7 +214,17 @@ export function RetentionApp() {
 
   const onCallEvent = useCallback((event: CallEvent) => {
     if (event.type === "workflow_node_entered") setActiveNodeId(event.workflowNodeId);
-    if (event.type === "call_started") setActiveNodeId(event.state.activeNodeId);
+    if (event.type === "call_started") {
+      setActiveNodeId(event.state.activeNodeId);
+      setLatestCall({
+        name: callCustomer?.name ?? "Sample customer",
+        status: "In progress",
+        branch: "Listening",
+        outcome: "Live conversation",
+        duration: "00:00",
+        started: "just now",
+      });
+    }
     if (event.type === "state_updated" || event.type === "call_completed") {
       const snapshot = event.state;
       setActiveNodeId(snapshot.activeNodeId);
@@ -187,18 +238,39 @@ export function RetentionApp() {
         priceSensitivity: snapshot.barrier === "tracking_effort" ? "Low" : current.priceSensitivity,
         confidence: snapshot.state === "completed" ? 0.94 : 0.88,
       }));
+      if (snapshot.barrier) {
+        const branchByBarrier = {
+          tracking_effort: "Habit / busy",
+          accuracy: "Product frustration",
+          price: "Price",
+          missing_feature: "Low perceived value",
+          technical_issue: "Product frustration",
+        } as const;
+        setLatestCall((current) => current ? { ...current, branch: branchByBarrier[snapshot.barrier!] } : current);
+      }
+    }
+    if (event.type === "action_taken") {
+      setLatestCall((current) => current ? { ...current, outcome: event.action.label } : current);
     }
     if (event.type === "call_completed" && callCustomer) {
+      const failed = event.metrics.some((metric) => metric.value === "Failed");
+      setLatestCall((current) => current ? {
+        ...current,
+        status: failed ? "Failed" : "Completed",
+        outcome: failed ? "Call could not connect" : current.outcome === "Live conversation" ? "Insight saved" : current.outcome,
+        duration: `${String(Math.floor(event.elapsedMs / 60_000)).padStart(2, "0")}:${String(Math.floor(event.elapsedMs / 1_000) % 60).padStart(2, "0")}`,
+      } : current);
+      if (!failed) setLiveCallCompleted(true);
       setCustomers((current) =>
         current.map((customer) =>
           customer.id !== callCustomer.id ||
-          customer.interactions.some((interaction) => interaction.id === `${customer.id}-demo-call`)
+          customer.interactions.some((interaction) => interaction.id === `${customer.id}-live-call`)
             ? customer
             : {
                 ...customer,
                 interactions: [
                   {
-                    id: `${customer.id}-demo-call`,
+                    id: `${customer.id}-live-call`,
                     type: "call",
                     at: event.timestamp,
                     summary: "AI retention research call completed.",
@@ -226,6 +298,12 @@ export function RetentionApp() {
         workflowId={workflowId}
         onViewChange={setView}
         onWorkflowChange={chooseWorkflow}
+        onAddWorkflow={() => {
+          setView("analysis");
+          setRunStage("start");
+          setCommandConfirmation("New workflow ready. Describe the cohort and desired outcome below.");
+          setActiveNodeId(undefined);
+        }}
       />
 
       {view === "analysis" && (
@@ -239,6 +317,15 @@ export function RetentionApp() {
               commandConfirmation={commandConfirmation}
               onWorkflowSelect={chooseWorkflow}
               onCommand={runCommand}
+              stage={runStage}
+              onStageChange={(stage) => {
+                setRunStage(stage);
+                setActiveNodeId(
+                  stage === "start" ? "start" : stage === "select_users" ? "select_users" : "outbound_call",
+                );
+              }}
+              selectedTestCustomer={ammarCustomer}
+              onCall={startCustomerCall}
               onFollowUp={(index) => {
                 if (index === 0) setView("customers");
                 if (index === 1) runCommand("Only offer a free month if price is the actual problem");
@@ -338,7 +425,7 @@ export function RetentionApp() {
                 </p>
               </div>
               <span className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600">
-                100 deterministic profiles
+                100 customer profiles
               </span>
             </div>
             <CustomerTable customers={customers} onSelect={openCustomer} onCall={startCustomerCall} />
@@ -346,12 +433,17 @@ export function RetentionApp() {
         </main>
       )}
 
-      {view === "calls" && <CallsView onReplay={() => startCustomerCall(ammarCustomer)} />}
+      {view === "calls" && (
+        <CallsView
+          onStartCall={() => startCustomerCall(ammarCustomer)}
+          latestCall={latestCall}
+        />
+      )}
 
       {view === "insights" && (
         <main className="min-w-0 flex-1 overflow-y-auto bg-slate-50 p-7">
           <div className="mx-auto max-w-7xl">
-            <InsightsView customers={customers} />
+            <InsightsView customers={customers} completedDelta={liveCallCompleted ? 1 : 0} />
           </div>
         </main>
       )}
@@ -368,6 +460,7 @@ export function RetentionApp() {
         open={callOpen}
         onOpenChange={setCallOpen}
         onEvent={onCallEvent}
+        workflowRule={workflowRule}
       />
     </div>
   );

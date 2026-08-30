@@ -71,7 +71,7 @@ function WorkflowNode({ data }: NodeProps<CanvasNode>) {
     <>
       <Handle
         type="target"
-        position={Position.Left}
+        position={Position.Top}
         className="!size-2 !border-slate-300 !bg-white !opacity-0"
       />
       <motion.button
@@ -86,15 +86,25 @@ function WorkflowNode({ data }: NodeProps<CanvasNode>) {
           "nodrag w-52 rounded-lg border bg-white p-3 text-left shadow-sm outline-none",
           "transition-colors duration-150 motion-reduce:transition-none",
           "hover:border-slate-400 focus-visible:ring-2 focus-visible:ring-blue-600 focus-visible:ring-offset-2",
-          data.pathActive ? "border-blue-300" : "border-slate-200",
-          data.active && "border-blue-600 ring-2 ring-blue-100",
-          data.selected && "border-blue-600",
+          data.pathActive ? "border-emerald-300 bg-emerald-50/30" : "border-slate-200",
+          data.active && "border-emerald-600 bg-white ring-2 ring-emerald-100",
+          data.selected && !data.active && "border-blue-600",
           data.emphasized && !data.active && "ring-2 ring-slate-300",
         )}
       >
-        {data.definition.kind === "branch" && (
-          <span className="mb-2 block truncate text-xs font-medium text-slate-500">
-            Decision
+        {(data.definition.kind === "branch" || data.active) && (
+          <span className="mb-2 flex items-center justify-between gap-2 text-xs font-medium">
+            {data.definition.kind === "branch" ? (
+              <span className="truncate text-slate-500">Decision</span>
+            ) : (
+              <span aria-hidden="true" />
+            )}
+            {data.active && (
+              <span className="inline-flex shrink-0 items-center gap-1.5 text-emerald-700">
+                <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                Current
+              </span>
+            )}
           </span>
         )}
         <span className="flex items-start gap-2.5">
@@ -102,7 +112,7 @@ function WorkflowNode({ data }: NodeProps<CanvasNode>) {
             className={cn(
               "flex size-8 shrink-0 items-center justify-center rounded-md border",
               data.pathActive
-                ? "border-blue-200 bg-blue-50 text-blue-700"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                 : "border-slate-200 bg-slate-50 text-slate-600",
             )}
           >
@@ -122,7 +132,7 @@ function WorkflowNode({ data }: NodeProps<CanvasNode>) {
       </motion.button>
       <Handle
         type="source"
-        position={Position.Right}
+        position={Position.Bottom}
         className="!size-2 !border-slate-300 !bg-white !opacity-0"
       />
     </>
@@ -225,18 +235,19 @@ function workflowPositions(workflow: WorkflowDefinition) {
     }
   }
 
-  const columns = new Map<number, string[]>();
+  const rows = new Map<number, string[]>();
   for (const node of workflow.nodes) {
     const nodeDepth = depth.get(node.id) ?? 0;
-    columns.set(nodeDepth, [...(columns.get(nodeDepth) ?? []), node.id]);
+    rows.set(nodeDepth, [...(rows.get(nodeDepth) ?? []), node.id]);
   }
 
   return new Map(
     workflow.nodes.map((node) => {
       const nodeDepth = depth.get(node.id) ?? 0;
-      const column = columns.get(nodeDepth) ?? [node.id];
-      const row = column.indexOf(node.id);
-      return [node.id, { x: nodeDepth * 280, y: row * 140 - ((column.length - 1) * 140) / 2 }];
+      const row = rows.get(nodeDepth) ?? [node.id];
+      const siblingIndex = row.indexOf(node.id);
+      const rowWidth = (row.length - 1) * 244;
+      return [node.id, { x: siblingIndex * 244 - rowWidth / 2, y: nodeDepth * 132 }];
     }),
   );
 }
@@ -283,7 +294,7 @@ export function WorkflowCanvas({
     () =>
       workflow.edges.map((definition) => {
         const highlighted = path.edgeIds.has(definition.id);
-        const color = highlighted ? "#2563eb" : "#cbd5e1";
+        const color = highlighted ? "#34d399" : "#cbd5e1";
         return {
           id: definition.id,
           source: definition.source,
@@ -291,7 +302,7 @@ export function WorkflowCanvas({
           label: definition.label,
           type: "smoothstep",
           markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-          style: { stroke: color, strokeWidth: highlighted ? 1.5 : 1 },
+          style: { stroke: color, strokeWidth: highlighted ? 1.75 : 1 },
           labelStyle: { fill: "#64748b", fontSize: 11, fontWeight: 500 },
           labelBgStyle: { fill: "#ffffff", fillOpacity: 0.94 },
           labelBgPadding: [5, 3] as [number, number],
@@ -317,7 +328,7 @@ export function WorkflowCanvas({
         edges={edges}
         nodeTypes={nodeTypes}
         fitView
-        fitViewOptions={{ padding: 0.22, duration: 0 }}
+        fitViewOptions={{ padding: 0.16, duration: 0 }}
         minZoom={0.45}
         maxZoom={1.6}
         nodesConnectable={false}
