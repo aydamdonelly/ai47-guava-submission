@@ -1,8 +1,9 @@
-import type { CallEvent, Customer } from "../product/types";
+import type { CallAnalysis, CallEvent, Customer } from "../product/types";
 
 export type CallEventListener = (event: CallEvent) => void;
 
 export interface CallSession {
+  readonly callId: string | null;
   stop: () => void;
   finished: Promise<CallEvent>;
 }
@@ -37,6 +38,7 @@ export function startCall(
   let stopped = false;
   let cursor = 0;
   let completionReceived = false;
+  let remoteCallId: string | null = null;
   let resolveFinished: (event: CallEvent) => void = () => undefined;
   const finished = new Promise<CallEvent>((resolve) => {
     resolveFinished = resolve;
@@ -114,10 +116,16 @@ export function startCall(
       if (!response.ok) throw new Error(await response.text());
       return response.json() as Promise<{ callId: string }>;
     })
-    .then(({ callId }) => poll(callId))
+    .then(({ callId }) => {
+      remoteCallId = callId;
+      return poll(callId);
+    })
     .catch(handleFailure);
 
   return {
+    get callId() {
+      return remoteCallId;
+    },
     stop: () => {
       stopped = true;
       controller.abort();
@@ -128,6 +136,24 @@ export function startCall(
 }
 
 export const createLiveCall = startCall;
+
+export async function analyzeCall(callId: string): Promise<CallAnalysis> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, attempt * 350));
+    }
+    try {
+      const response = await fetch(`/api/retention/calls/${callId}/analysis`);
+      if (response.status === 409 || response.status === 425) continue;
+      if (!response.ok) throw new Error("Could not analyze the completed call");
+      return (await response.json()) as CallAnalysis;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("Call analysis failed");
+    }
+  }
+  throw lastError ?? new Error("Call analysis failed");
+}
 
 export function receiveCallEvent(event: CallEvent, listener: CallEventListener) {
   listener(event);

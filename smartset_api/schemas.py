@@ -60,6 +60,33 @@ class RetentionCallStatus(BaseModel):
     next_cursor: int = Field(alias="nextCursor", ge=0)
 
 
+class CallAnalysis(BaseModel):
+    """Structured, UI-ready recap of one completed retention call."""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    summary: str = Field(min_length=1, max_length=1200)
+    customer_goal: str = Field(alias="customerGoal", min_length=1, max_length=500)
+    goal_relevant: bool | None = Field(default=None, alias="goalRelevant")
+    primary_barrier: Literal[
+        "habit",
+        "product",
+        "price",
+        "value",
+        "alternative",
+        "goal_changed",
+        "other",
+    ] = Field(alias="primaryBarrier")
+    reason_label: str = Field(alias="reasonLabel", min_length=1, max_length=160)
+    competitor: str | None = Field(default=None, max_length=160)
+    key_quote: str | None = Field(default=None, alias="keyQuote", max_length=600)
+    return_intent: Literal["yes", "maybe", "no", "unknown"] = Field(
+        alias="returnIntent"
+    )
+    outcome: str = Field(min_length=1, max_length=500)
+    emerging_insight: str = Field(alias="emergingInsight", min_length=1, max_length=800)
+
+
 class WorkflowInterpretRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -79,6 +106,7 @@ class InsightQuestion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     question: str = Field(min_length=1, max_length=1000)
+    analyses: list[dict[str, object]] = Field(default_factory=list, max_length=20)
 
 
 class InsightAnswer(BaseModel):

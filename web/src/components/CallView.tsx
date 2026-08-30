@@ -47,6 +47,10 @@ const barrierLabels = {
   price: "Price",
   missing_feature: "Missing feature",
   technical_issue: "Technical issue",
+  privacy: "Privacy",
+  goal_changed: "Goal changed",
+  other: "Other",
+  unknown: "Discovering",
 } as const;
 
 const goalLabels: Record<Customer["goal"], string> = {

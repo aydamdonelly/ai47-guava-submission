@@ -12,10 +12,21 @@ import { InsightsView } from "../components/InsightsView";
 import { Sidebar } from "../components/Sidebar";
 import type { AppView, WorkflowId } from "../components/Sidebar";
 import { WorkflowCanvas } from "../components/WorkflowCanvas";
-import { startCall } from "../lib/callAdapter";
+import { analyzeCall, startCall } from "../lib/callAdapter";
 import { cn } from "../lib/cn";
 import { ammarCustomer, smartsetCustomers } from "../product/fixtures";
-import type { CallEvent, Customer, Workflow } from "../product/types";
+import type {
+  CallAnalysis,
+  CallAnalysisBarrier,
+  CallEvent,
+  CallStateSnapshot,
+  CompletedCallRecord,
+  Customer,
+  CustomerGoal,
+  EngineBarrierCode,
+  TranscriptLine,
+  Workflow,
+} from "../product/types";
 import { workflowById } from "../product/workflows";
 
 type InspectorTab = "state" | "checks" | "fencer" | "decision" | "node";
@@ -36,6 +47,69 @@ const followUps = [
   "Change the retention offer",
   "Review recent call insights",
 ];
+
+const branchLabels: Record<CallAnalysisBarrier, string> = {
+  habit: "Habit / busy",
+  product: "Product frustration",
+  price: "Price",
+  value: "Low perceived value",
+  alternative: "Alternative",
+  goal_changed: "Goal changed",
+  other: "Other",
+};
+
+const customerBarrierByAnalysis: Partial<
+  Record<CallAnalysisBarrier, Customer["primaryBarrier"]>
+> = {
+  habit: "tracking_effort",
+  product: "technical_issue",
+  price: "price",
+  value: "missing_feature",
+};
+
+function analysisBarrierFromEngine(barrier?: EngineBarrierCode): CallAnalysisBarrier {
+  if (barrier === "tracking_effort") return "habit";
+  if (barrier === "accuracy" || barrier === "technical_issue") return "product";
+  if (barrier === "price") return "price";
+  if (barrier === "missing_feature") return "value";
+  if (barrier === "goal_changed") return "goal_changed";
+  return "other";
+}
+
+function fallbackAnalysis(
+  state: Partial<CallStateSnapshot>,
+  transcript: readonly TranscriptLine[],
+  outcome: string,
+): CallAnalysis {
+  const primaryBarrier = analysisBarrierFromEngine(state.barrier);
+  const reasonLabel = branchLabels[primaryBarrier];
+  const customerGoal = typeof state.customerGoal === "string" && state.customerGoal.trim()
+    ? state.customerGoal.trim()
+    : "Not captured";
+  const customerLines = transcript.filter((line) => line.speaker === "customer" && line.text.length > 8);
+  const keyQuote = customerLines.sort((a, b) => b.text.length - a.text.length)[0]?.text ?? null;
+  return {
+    summary: `The customer described ${reasonLabel.toLowerCase()} as the main barrier while working toward ${customerGoal}.`,
+    customerGoal,
+    goalRelevant: state.goalRelevant ?? null,
+    primaryBarrier,
+    reasonLabel,
+    competitor: null,
+    keyQuote,
+    returnIntent: state.reengagementIntent ?? "unknown",
+    outcome,
+    emergingInsight: `${reasonLabel} is an additional churn signal worth tracking across future calls.`,
+  };
+}
+
+function goalFromAnalysis(current: CustomerGoal, goal: string): CustomerGoal {
+  const normalized = goal.toLowerCase();
+  if (/muscle|protein|strength|bulk/.test(normalized)) return "build_muscle";
+  if (/maintain|stay.*weight/.test(normalized)) return "maintain_weight";
+  if (/health|better.*eat|nutrition/.test(normalized)) return "eat_healthier";
+  if (/lose|weight|slim/.test(normalized)) return "lose_weight";
+  return current;
+}
 
 function DecisionEnginePanel() {
   return (
@@ -90,9 +164,13 @@ export function RetentionApp() {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [latestCall, setLatestCall] = useState<LiveCallRecord>();
-  const [liveCallCompleted, setLiveCallCompleted] = useState(false);
+  const [liveCalls, setLiveCalls] = useState<readonly CompletedCallRecord[]>([]);
   const activeCallCustomerRef = useRef<Customer | null>(null);
   const callSessionRef = useRef<ReturnType<typeof startCall> | null>(null);
+  const activeTranscriptRef = useRef<TranscriptLine[]>([]);
+  const activeStateRef = useRef<Partial<CallStateSnapshot>>({});
+  const activeOutcomeRef = useRef("Insight saved");
+  const activeStartedAtRef = useRef("");
 
   const workflow = useMemo<Workflow>(() => {
     const base = workflowById[workflowId];
@@ -185,6 +263,11 @@ export function RetentionApp() {
   function startCustomerCall(customer: Customer) {
     if (callSessionRef.current) return;
     activeCallCustomerRef.current = customer;
+    activeTranscriptRef.current = [];
+    activeStateRef.current = {};
+    activeOutcomeRef.current = "Insight saved";
+    activeStartedAtRef.current = new Date().toISOString();
+    setDrawerOpen(false);
     setWorkflowId("churn");
     setView("analysis");
     setActiveNodeId("select_users");
@@ -200,12 +283,17 @@ export function RetentionApp() {
   }
 
   const onCallEvent = useCallback((event: CallEvent) => {
+    if (event.type === "transcript_update") {
+      activeTranscriptRef.current = [...activeTranscriptRef.current, event.transcript];
+    }
     if (event.type === "workflow_node_entered") {
       setActiveNodeId(event.workflowNodeId);
       if (event.workflowNodeId === "select_users") setRunStage("select_users");
       if (event.workflowNodeId === "outbound_call") setRunStage("calling");
     }
     if (event.type === "call_started") {
+      activeStartedAtRef.current = event.timestamp;
+      activeStateRef.current = { ...activeStateRef.current, ...event.state };
       setActiveNodeId(event.state.activeNodeId);
       setRunStage("calling");
       setLatestCall({
@@ -219,6 +307,7 @@ export function RetentionApp() {
     }
     if (event.type === "state_updated" || event.type === "call_completed") {
       const snapshot = event.state;
+      activeStateRef.current = { ...activeStateRef.current, ...snapshot };
       const failed = event.type === "call_completed" && event.metrics.some((metric) => metric.value === "Failed");
       if (failed) {
         setActiveNodeId(undefined);
@@ -258,44 +347,83 @@ export function RetentionApp() {
           price: "Price",
           missing_feature: "Low perceived value",
           technical_issue: "Product frustration",
+          privacy: "Privacy",
+          goal_changed: "Goal changed",
+          other: "Other",
+          unknown: "Discovering",
         } as const;
         setLatestCall((current) => current ? { ...current, branch: branchByBarrier[snapshot.barrier!] } : current);
       }
     }
     if (event.type === "action_taken") {
+      activeOutcomeRef.current = event.action.label;
       setLatestCall((current) => current ? { ...current, outcome: event.action.label } : current);
     }
     const callCustomer = activeCallCustomerRef.current;
     if (event.type === "call_completed" && callCustomer) {
       const failed = event.metrics.some((metric) => metric.value === "Failed");
+      const callId = callSessionRef.current?.callId ?? `local-${Date.now()}`;
+      const transcript = [...activeTranscriptRef.current];
+      const finalState = { ...activeStateRef.current };
+      const startedAt = activeStartedAtRef.current || event.timestamp;
+      const outcome = failed ? "Call could not connect" : activeOutcomeRef.current;
+      const duration = `${String(Math.floor(event.elapsedMs / 60_000)).padStart(2, "0")}:${String(Math.floor(event.elapsedMs / 1_000) % 60).padStart(2, "0")}`;
       setRunStage("idle");
       setLatestCall((current) => current ? {
         ...current,
         status: failed ? "Failed" : "Completed",
-        outcome: failed ? "Call could not connect" : current.outcome === "Live conversation" ? "Insight saved" : current.outcome,
-        duration: `${String(Math.floor(event.elapsedMs / 60_000)).padStart(2, "0")}:${String(Math.floor(event.elapsedMs / 1_000) % 60).padStart(2, "0")}`,
+        outcome,
+        duration,
       } : current);
-      if (!failed) setLiveCallCompleted(true);
-      setCustomers((current) =>
-        current.map((customer) =>
-          customer.id !== callCustomer.id ||
-          customer.interactions.some((interaction) => interaction.id === `${customer.id}-live-call`)
-            ? customer
-            : {
-                ...customer,
-                interactions: [
-                  {
-                    id: `${customer.id}-live-call`,
-                    type: "call",
-                    at: event.timestamp,
-                    summary: "AI retention research call completed.",
-                    outcome: "Restart plan sent",
-                  },
-                  ...customer.interactions,
-                ],
-              },
-        ),
-      );
+
+      void (async () => {
+        let analysis = fallbackAnalysis(finalState, transcript, outcome);
+        if (!failed && !callId.startsWith("local-")) {
+          try {
+            analysis = await analyzeCall(callId);
+          } catch {
+            // The live event data still produces a truthful recap if analysis is unavailable.
+          }
+        }
+        const record: CompletedCallRecord = {
+          id: callId,
+          customerId: callCustomer.id,
+          name: callCustomer.name,
+          status: failed ? "Failed" : "Completed",
+          branch: branchLabels[analysis.primaryBarrier],
+          outcome: analysis.outcome || outcome,
+          duration,
+          started: "just now",
+          startedAt,
+          transcript,
+          analysis,
+        };
+        setLiveCalls((current) => [record, ...current.filter((item) => item.id !== record.id)]);
+        setLatestCall(undefined);
+
+        const customerBarrier = customerBarrierByAnalysis[analysis.primaryBarrier];
+        setCustomers((current) =>
+          current.map((customer) =>
+            customer.id === callCustomer.id
+              ? {
+                  ...customer,
+                  goal: goalFromAnalysis(customer.goal, analysis.customerGoal),
+                  ...(customerBarrier ? { primaryBarrier: customerBarrier } : {}),
+                  interactions: [
+                    {
+                      id: `${customer.id}-${record.id}`,
+                      type: "call",
+                      at: event.timestamp,
+                      summary: analysis.summary,
+                      outcome: analysis.outcome || outcome,
+                    },
+                    ...customer.interactions,
+                  ],
+                }
+              : customer,
+          ),
+        );
+      })();
     }
   }, []);
 
@@ -447,14 +575,15 @@ export function RetentionApp() {
       {view === "calls" && (
         <CallsView
           onStartCall={() => startCustomerCall(ammarCustomer)}
-          latestCall={latestCall}
+          liveCalls={liveCalls}
+          currentCall={latestCall}
         />
       )}
 
       {view === "insights" && (
         <main className="min-w-0 flex-1 overflow-y-auto bg-slate-50 p-7">
           <div className="mx-auto max-w-7xl">
-            <InsightsView customers={customers} completedDelta={liveCallCompleted ? 1 : 0} />
+            <InsightsView customers={customers} liveCalls={liveCalls} />
           </div>
         </main>
       )}

@@ -10,12 +10,16 @@ from fastapi.responses import FileResponse, RedirectResponse
 
 from smartset_api.retention_calls import (
     RetentionCallProcess,
+    analyze_call_events,
     ask_insights,
+    call_is_complete,
     interpret_workflow,
+    load_call_events,
     retention_call_readiness,
     start_retention_call,
 )
 from smartset_api.schemas import (
+    CallAnalysis,
     InsightAnswer,
     InsightQuestion,
     RetentionCallAccepted,
@@ -54,6 +58,7 @@ def create_app(*, frontend_dir: str | Path | None = None) -> FastAPI:
     )
     app.state.frontend_dir = selected_frontend if has_frontend else None
     app.state.retention_calls: dict[str, RetentionCallProcess] = {}
+    app.state.retention_analyses: dict[str, CallAnalysis] = {}
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -118,6 +123,37 @@ def create_app(*, frontend_dir: str | Path | None = None) -> FastAPI:
             "nextCursor": next_cursor,
         }
 
+    @app.get(
+        "/api/retention/calls/{call_id}/analysis",
+        response_model=CallAnalysis,
+    )
+    def get_retention_call_analysis(call_id: str, request: Request) -> CallAnalysis:
+        cached = request.app.state.retention_analyses.get(call_id)
+        if cached is not None:
+            return cached
+
+        process = request.app.state.retention_calls.get(call_id)
+        try:
+            events = (
+                process.events(0)[0]
+                if process is not None
+                else load_call_events(call_id)
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="retention call not found",
+            ) from exc
+        if not call_is_complete(events):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="retention call has not completed",
+            )
+
+        analysis = analyze_call_events(events)
+        request.app.state.retention_analyses[call_id] = analysis
+        return analysis
+
     @app.post(
         "/api/retention/workflows/interpret",
         response_model=WorkflowInterpretation,
@@ -142,9 +178,18 @@ def create_app(*, frontend_dir: str | Path | None = None) -> FastAPI:
         "/api/retention/insights/ask",
         response_model=InsightAnswer,
     )
-    def post_insight_question(payload: InsightQuestion) -> InsightAnswer:
+    def post_insight_question(
+        payload: InsightQuestion, request: Request
+    ) -> InsightAnswer:
+        cached_analyses = [
+            {"callId": call_id, **analysis.model_dump(by_alias=True)}
+            for call_id, analysis in request.app.state.retention_analyses.items()
+        ]
         try:
-            return ask_insights(payload.question)
+            return ask_insights(
+                payload.question,
+                [*payload.analyses, *cached_analyses][-20:],
+            )
         except RuntimeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

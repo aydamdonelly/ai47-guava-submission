@@ -71,6 +71,12 @@ export type BarrierId =
   | "price"
   | "missing_feature"
   | "technical_issue";
+export type EngineBarrierCode =
+  | BarrierId
+  | "privacy"
+  | "goal_changed"
+  | "other"
+  | "unknown";
 export type ResponseKind = "boolean" | "free_text" | "rating" | "single_select" | "permission";
 
 export interface ResponseOption {
@@ -206,6 +212,42 @@ export interface TranscriptLine {
   elapsedMs: number;
 }
 
+export type CallAnalysisBarrier =
+  | "habit"
+  | "product"
+  | "price"
+  | "value"
+  | "alternative"
+  | "goal_changed"
+  | "other";
+
+export interface CallAnalysis {
+  summary: string;
+  customerGoal: string;
+  goalRelevant: boolean | null;
+  primaryBarrier: CallAnalysisBarrier;
+  reasonLabel: string;
+  competitor: string | null;
+  keyQuote: string | null;
+  returnIntent: "yes" | "maybe" | "no" | "unknown";
+  outcome: string;
+  emergingInsight: string;
+}
+
+export interface CompletedCallRecord {
+  id: string;
+  customerId: string;
+  name: string;
+  status: "Completed" | "Failed";
+  branch: string;
+  outcome: string;
+  duration: string;
+  started: string;
+  startedAt: string;
+  transcript: readonly TranscriptLine[];
+  analysis: CallAnalysis;
+}
+
 export type CallState =
   | "agent_speaking"
   | "listening"
@@ -226,7 +268,7 @@ export interface CallStateSnapshot {
   productIssue?: string | null;
   confidence?: number | null;
   goalRelevant?: boolean;
-  barrier?: BarrierId;
+  barrier?: EngineBarrierCode;
   priceIsRootCause?: boolean;
   followUpDepth: number;
 }

@@ -13,12 +13,15 @@ import { FormEvent, useState } from "react";
 
 import { cn } from "../lib/cn";
 import { smartsetCustomers } from "../product/fixtures";
-import type { Customer } from "../product/types";
+import type { CallAnalysisBarrier, CompletedCallRecord, Customer } from "../product/types";
 
 interface InsightsViewProps {
   customers?: readonly Customer[];
-  completedDelta?: number;
+  liveCalls: readonly CompletedCallRecord[];
 }
+
+const BASE_CONTACTED = 38;
+const BASE_COMPLETED = 29;
 
 const metrics = [
   { label: "Customers", value: "100", icon: Users },
@@ -29,13 +32,19 @@ const metrics = [
   { label: "ARR retained", value: "$1,258", icon: CircleDollarSign },
 ] as const;
 
-const reasons = [
-  { label: "Habit broken", value: 31 },
-  { label: "Product friction", value: 24 },
-  { label: "Price", value: 18 },
-  { label: "Low perceived value", value: 15 },
-  { label: "Alternative", value: 12 },
-] as const;
+const reasonDefinitions: readonly {
+  id: CallAnalysisBarrier;
+  label: string;
+  baselineShare: number;
+}[] = [
+  { id: "habit", label: "Habit broken", baselineShare: 31 },
+  { id: "product", label: "Product friction", baselineShare: 24 },
+  { id: "price", label: "Price", baselineShare: 18 },
+  { id: "value", label: "Low perceived value", baselineShare: 15 },
+  { id: "alternative", label: "Alternative", baselineShare: 12 },
+  { id: "goal_changed", label: "Goal changed", baselineShare: 0 },
+  { id: "other", label: "Other", baselineShare: 0 },
+];
 
 const quotes = [
   "I liked the app—I just fell out of the habit when work got busy.",
@@ -53,13 +62,85 @@ interface InsightAnswerResponse {
   answer: string;
 }
 
-export function InsightsView({ customers = smartsetCustomers, completedDelta = 0 }: InsightsViewProps) {
+function formatShare(value: number) {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? `${rounded}%` : `${rounded.toFixed(1)}%`;
+}
+
+export function InsightsView({ customers = smartsetCustomers, liveCalls }: InsightsViewProps) {
   const reduceMotion = useReducedMotion();
   const entrance = reduceMotion ? undefined : { opacity: 0, y: 6 };
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const successfulLiveCalls = liveCalls.filter((call) => call.status === "Completed");
+  const completedCount = BASE_COMPLETED + successfulLiveCalls.length;
+  const newestLiveCall = successfulLiveCalls.reduce<CompletedCallRecord | null>(
+    (newest, call) => (!newest || call.startedAt > newest.startedAt ? call : newest),
+    null,
+  );
+  const liveReasonCounts = successfulLiveCalls.reduce<Map<CallAnalysisBarrier, number>>(
+    (counts, call) => {
+      const barrier = call.analysis.primaryBarrier;
+      counts.set(barrier, (counts.get(barrier) ?? 0) + 1);
+      return counts;
+    },
+    new Map(),
+  );
+  const reasons = reasonDefinitions
+    .map((reason, order) => {
+      const liveCount = liveReasonCounts.get(reason.id) ?? 0;
+      const latestMatchingCall = successfulLiveCalls.reduce<CompletedCallRecord | null>(
+        (latest, call) =>
+          call.analysis.primaryBarrier === reason.id && (!latest || call.startedAt > latest.startedAt)
+            ? call
+            : latest,
+        null,
+      );
+      const baselineCount = (reason.baselineShare / 100) * BASE_COMPLETED;
+      return {
+        ...reason,
+        order,
+        label:
+          reason.baselineShare === 0 && latestMatchingCall?.analysis.reasonLabel.trim()
+            ? latestMatchingCall.analysis.reasonLabel.trim()
+            : reason.label,
+        value: ((baselineCount + liveCount) / completedCount) * 100,
+      };
+    })
+    .filter((reason) => reason.baselineShare > 0 || (liveReasonCounts.get(reason.id) ?? 0) > 0)
+    .sort((left, right) => right.value - left.value || left.order - right.order);
+  const competitorMentions = successfulLiveCalls.reduce<
+    Map<string, { label: string; count: number; latestAt: string }>
+  >((mentions, call) => {
+    const label = call.analysis.competitor?.trim();
+    if (!label) return mentions;
+    const key = label.toLocaleLowerCase();
+    const current = mentions.get(key);
+    mentions.set(key, {
+      label,
+      count: (current?.count ?? 0) + 1,
+      latestAt: current && current.latestAt > call.startedAt ? current.latestAt : call.startedAt,
+    });
+    return mentions;
+  }, new Map());
+  const topLiveCompetitor = [...competitorMentions.values()].sort(
+    (left, right) => right.count - left.count || right.latestAt.localeCompare(left.latestAt),
+  )[0];
+  const newestKeyQuote = newestLiveCall?.analysis.keyQuote?.trim();
+  const visibleQuotes = newestKeyQuote
+    ? [
+        { text: newestKeyQuote, source: "Latest live conversation · anonymized" },
+        ...quotes.slice(0, 2).map((text, index) => ({
+          text,
+          source: `Conversation ${String(index + 1).padStart(2, "0")} · anonymized`,
+        })),
+      ]
+    : quotes.map((text, index) => ({
+        text,
+        source: `Conversation ${String(index + 1).padStart(2, "0")} · anonymized`,
+      }));
 
   async function askQuestion(nextQuestion: string) {
     const trimmed = nextQuestion.trim();
@@ -72,7 +153,14 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
       const response = await fetch("/api/retention/insights/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed }),
+        body: JSON.stringify({
+          question: trimmed,
+          analyses: successfulLiveCalls.map(({ id, name, analysis }) => ({
+            callId: id,
+            customer: name,
+            ...analysis,
+          })),
+        }),
       });
       const payload = (await response.json()) as Partial<InsightAnswerResponse> & {
         detail?: string;
@@ -180,9 +268,9 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
         {metrics.map((metric, index) => {
           const Icon = metric.icon;
           const value = metric.label === "Contacted"
-            ? String(38 + completedDelta)
+            ? String(BASE_CONTACTED + successfulLiveCalls.length)
             : metric.label === "Conversations completed"
-              ? String(29 + completedDelta)
+              ? String(completedCount)
               : metric.value;
           return (
             <motion.article
@@ -214,7 +302,7 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
               </p>
             </div>
             <span className="rounded-full border border-slate-200 px-2.5 py-1 text-xs font-medium tabular-nums text-slate-600">
-              n=29
+              n={completedCount}
             </span>
           </div>
 
@@ -223,7 +311,7 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
               <li key={reason.label}>
                 <div className="flex items-center justify-between gap-4 text-sm">
                   <span className="font-medium text-slate-800">{reason.label}</span>
-                  <span className="font-semibold tabular-nums text-slate-950">{reason.value}%</span>
+                  <span className="font-semibold tabular-nums text-slate-950">{formatShare(reason.value)}</span>
                 </div>
                 <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100" aria-hidden="true">
                   <div
@@ -240,18 +328,24 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
           <article className="rounded-xl border border-blue-200 bg-blue-50 p-5">
             <p className="text-xs font-semibold text-blue-800">Emerging insight</p>
             <p className="mt-3 text-pretty text-base font-medium leading-7 text-slate-950">
-              “Users frequently lose their tracking habit after 7–14 days of inactivity.”
+              “{newestLiveCall?.analysis.emergingInsight.trim() || "Users frequently lose their tracking habit after 7–14 days of inactivity."}”
             </p>
             <p className="mt-4 text-pretty text-xs leading-5 text-blue-900/70">
-              Trigger outreach before a temporary routine break becomes permanent churn.
+              {newestLiveCall
+                ? `Latest completed call · ${newestLiveCall.analysis.reasonLabel}`
+                : "Trigger outreach before a temporary routine break becomes permanent churn."}
             </p>
           </article>
 
           <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
             <p className="text-xs font-medium text-slate-500">Top mentioned alternative</p>
-            <p className="mt-2 text-lg font-semibold text-slate-950">MyFitnessPal</p>
+            <p className="mt-2 text-lg font-semibold text-slate-950">
+              {topLiveCompetitor?.label ?? "MyFitnessPal"}
+            </p>
             <p className="mt-1 text-pretty text-sm text-slate-500">
-              Most often cited for familiarity, not stronger product satisfaction.
+              {topLiveCompetitor
+                ? `Mentioned in ${topLiveCompetitor.count} live ${topLiveCompetitor.count === 1 ? "conversation" : "conversations"}.`
+                : "Most often cited for familiarity, not stronger product satisfaction."}
             </p>
           </article>
         </div>
@@ -265,11 +359,11 @@ export function InsightsView({ customers = smartsetCustomers, completedDelta = 0
           </h3>
         </div>
         <div className="mt-3 grid gap-3 md:grid-cols-3">
-          {quotes.map((quote, index) => (
-            <blockquote key={quote} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-              <p className="text-pretty text-sm leading-6 text-slate-700">“{quote}”</p>
+          {visibleQuotes.map((quote) => (
+            <blockquote key={`${quote.source}-${quote.text}`} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <p className="text-pretty text-sm leading-6 text-slate-700">“{quote.text}”</p>
               <footer className="mt-4 text-xs font-medium text-slate-500">
-                Conversation {String(index + 1).padStart(2, "0")} · anonymized
+                {quote.source}
               </footer>
             </blockquote>
           ))}
