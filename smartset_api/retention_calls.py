@@ -218,7 +218,8 @@ def interpret_workflow(instruction: str) -> WorkflowInterpretation:
         ).strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        return WorkflowInterpretation.model_validate_json(text)
+        interpretation = WorkflowInterpretation.model_validate_json(text)
+        return interpretation.model_copy(update={"summary": instruction.strip()})
     except (urllib.error.URLError, TimeoutError, ValueError, KeyError) as exc:
         raise ConnectionError("workflow interpretation failed") from exc
 

@@ -34,7 +34,7 @@ class RetentionCallCreate(BaseModel):
     days_inactive: int = Field(alias="daysInactive", ge=0, le=3_650)
     churn_risk: int = Field(alias="churnRisk", ge=0, le=100)
     workflow_rule: str | None = Field(
-        default=None, alias="workflowRule", max_length=500
+        default=None, alias="workflowRule", max_length=1000
     )
     offer: RetentionOffer | None = None
 
@@ -69,7 +69,7 @@ class WorkflowInterpretRequest(BaseModel):
 class WorkflowInterpretation(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    summary: str = Field(min_length=1, max_length=240)
+    summary: str = Field(min_length=1, max_length=1000)
     offer_label: str | None = Field(default=None, alias="offerLabel", max_length=120)
     offer_months: int = Field(alias="offerMonths", ge=0, le=1)
     condition: str = Field(min_length=1, max_length=500)
