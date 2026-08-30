@@ -463,6 +463,10 @@ def build_agent(
         if offer
         else "Never propose an incentive or change an account."
     )
+    LOGGER.info(
+        "Configured retention offer: %s",
+        normalize_text((offer or {}).get("label")) or "none",
+    )
 
     agent = guava.Agent(
         name="Ava",
@@ -487,11 +491,6 @@ def build_agent(
         context.setdefault(
             "recent_weekly_events", _attempt_value(attempt, "recent_weekly_events")
         )
-
-        # The live conversation must discover the caller's goal from their own words.
-        # Keeping a fixture goal in model context would bias that answer and make the demo
-        # appear pre-scripted.
-        context.pop("original_goal", None)
 
         call.set_language_mode(primary="english")
         call.set_variable("dailyfuel_attempt_key", attempt_key)
