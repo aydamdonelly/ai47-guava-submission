@@ -1,39 +1,26 @@
-.PHONY: setup build test seed serve agent-chat agent-webrtc agent-phone demo
+.PHONY: setup build serve dev test engine-test
 
 setup:
 	uv sync --extra dev
-	uv sync --project agent
+	uv sync --project retention_engine --dev
 	npm --prefix web ci
 
 build:
 	npm --prefix web run build
 
-test: build
-	uv run pytest
-	uv run ruff check care_signal tests scripts/seed_demo.py
-	uv run ruff format --check care_signal tests scripts/seed_demo.py
-	uv run --project agent ruff check agent
-
-seed:
-	@set -a; [ ! -f .env ] || . ./.env; set +a; uv run python scripts/seed_demo.py
-
+# Backend plus the production frontend on http://127.0.0.1:8000
 serve: build
-	@set -a; [ ! -f .env ] || . ./.env; set +a; \
-		if [ -z "$$CARESIGNAL_DEMO_TOKEN" ]; then \
-			echo "Set CARESIGNAL_DEMO_TOKEN in .env before starting the dashboard." >&2; \
-			exit 2; \
-		fi; \
-		echo "Dashboard: http://127.0.0.1:8000/?token=$$CARESIGNAL_DEMO_TOKEN"; \
-		CARE_SIGNAL_HOST=127.0.0.1 uv run care-signal
+	uv run smartset-api
 
-agent-chat:
-	@set -a; [ ! -f .env ] || . ./.env; set +a; guava run agent -- --chat
+# Backend only. Run `npm --prefix web run dev` next to it for hot reload.
+dev:
+	SMARTSET_RELOAD=1 uv run smartset-api
 
-agent-webrtc:
-	@set -a; [ ! -f .env ] || . ./.env; set +a; guava run agent -- --webrtc
+test: build
+	uv run ruff check smartset_api
+	uv run ruff format --check smartset_api
+	$(MAKE) engine-test
 
-agent-phone:
-	@set -a; [ ! -f .env ] || . ./.env; set +a; guava run agent -- --phone
-
-demo:
-	./scripts/start_demo.sh --phone
+engine-test:
+	uv run --project retention_engine pytest retention_engine/tests
+	uv run --project retention_engine ruff check retention_engine

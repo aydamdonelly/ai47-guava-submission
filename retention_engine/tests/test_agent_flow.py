@@ -103,17 +103,23 @@ def test_call_start_discloses_ai_and_reaches_named_person() -> None:
     reach_task = task_commands(call)[-1]
     assert reach_task.task_id == "reach_person"
     opening = reach_task.action_items[0]
-    assert "AI voice assistant" in opening.statement
+    assert "AI assistant" in opening.statement
     assert "Smartset" in opening.statement
     assert "Jordan" in opening.statement
-    assert "without waiting" in reach_task.objective
+    availability = next(
+        item
+        for item in reach_task.action_items
+        if getattr(item, "key", "") == "contact_availability"
+    )
+    assert "do_not_contact" in availability.choices
+    assert "hang up" in reach_task.objective.casefold()
     assert not any(
         isinstance(command, SendCallerTextCommand) for command in call._command_queue
     )
     assert store.statuses[-1] == ("attempt-1", "answered", "call-1")
 
 
-def test_permission_gate_precedes_the_interview() -> None:
+def test_permission_gate_precedes_goal_discovery() -> None:
     store = FakeStore()
     agent = build_agent(store, "attempt-1")
     call = MockCall()
@@ -124,22 +130,42 @@ def test_permission_gate_precedes_the_interview() -> None:
     assert [task.task_id for task in task_commands(call)] == ["permission"]
     permission_task = task_commands(call)[0]
     assert "transcribed" in permission_task.action_items[0].question
-    assert "two minutes" in permission_task.action_items[0].question
+    assert "stop at any time" in permission_task.action_items[0].question
     assert permission_task.action_items[0].choices == ["yes", "no"]
 
     call.set_field("interview_permission", "yes")
     agent._on_task_complete_handlers["permission"](call)
 
+    goal_task = task_commands(call)[-1]
+    assert goal_task.task_id == "goal_discovery"
+    assert [item.key for item in goal_task.action_items if hasattr(item, "field_type")] == [
+        "original_goal_words"
+    ]
+    assert "do not suggest categories" in goal_task.objective.casefold()
+
+
+def test_relevant_goal_leads_to_one_open_barrier_question() -> None:
+    store = FakeStore()
+    agent = build_agent(store, "attempt-1")
+    call = MockCall()
+    call.set_field("original_goal_words", "Eat more consistently during the week.")
+
+    agent._on_task_complete_handlers["goal_discovery"](call)
+    relevance_task = task_commands(call)[-1]
+    assert relevance_task.task_id == "goal_relevance"
+    assert [item.key for item in relevance_task.action_items if hasattr(item, "field_type")] == [
+        "goal_relevant"
+    ]
+
+    call.set_field("goal_relevant", "yes")
+    agent._on_task_complete_handlers["goal_relevance"](call)
+
     interview_task = task_commands(call)[-1]
     assert interview_task.task_id == "interview"
     assert [item.key for item in interview_task.action_items if hasattr(item, "field_type")] == [
-        "satisfaction",
         "primary_reason_words",
         "reason_code",
         "biggest_friction",
-        "desired_change",
-        "return_intent",
-        "follow_up_allowed",
     ]
     assert "Never defend the product" in interview_task.objective
     assert "propose an incentive" in interview_task.objective
@@ -149,6 +175,26 @@ def test_permission_gate_precedes_the_interview() -> None:
         if getattr(item, "key", "") == "biggest_friction"
     )
     assert not friction_field.question
+
+
+def test_obsolete_goal_ends_the_call_without_a_retention_attempt() -> None:
+    store = FakeStore()
+    agent = build_agent(store, "attempt-1", offer={"label": "one free month", "months": 1})
+    call = MockCall()
+    call.set_field("original_goal_words", "Train for one specific race.")
+    call.set_field("goal_relevant", "no")
+
+    agent._on_task_complete_handlers["goal_relevance"](call)
+    goal_changed_task = task_commands(call)[-1]
+    assert goal_changed_task.task_id == "goal_changed"
+
+    call.set_field("goal_change_reason", "The race is over.")
+    agent._on_task_complete_handlers["goal_changed"](call)
+
+    assert [task.task_id for task in task_commands(call)] == ["goal_changed"]
+    persisted = result_mapping(store.results[0][1])
+    assert persisted["reason_code"] == "goal_changed"
+    assert persisted["primary_reason_words"] == "The race is over."
 
 
 def test_declining_permission_ends_without_starting_interview() -> None:
@@ -164,31 +210,67 @@ def test_declining_permission_ends_without_starting_interview() -> None:
     assert any(isinstance(command, SendInstructionCommand) for command in call._command_queue)
 
 
-def test_completed_interview_persists_all_fields_and_closes() -> None:
+def test_interview_validates_the_barrier_before_persisting() -> None:
     store = FakeStore()
     agent = build_agent(store, "attempt-1")
     call = MockCall()
-    values = {
-        "satisfaction": "2",
-        "primary_reason_words": "It took too long to log every meal.",
-        "reason_code": "tracking_effort",
-        "biggest_friction": "Manual corrections",
-        "desired_change": "Fewer taps",
-        "return_intent": "maybe",
-        "follow_up_allowed": "yes",
-    }
-    for key, value in values.items():
-        call.set_field(key, value)
+    call.set_field("primary_reason_words", "It took too long to log every meal.")
+    call.set_field("reason_code", "tracking_effort")
+    call.set_field("biggest_friction", "Manual corrections")
 
     agent._on_task_complete_handlers["interview"](call)
 
+    validation_task = task_commands(call)[-1]
+    assert validation_task.task_id == "causal_validation"
+    assert "if that issue were resolved" in validation_task.action_items[0].question.casefold()
+    assert not store.results
+
+    call.set_field("return_intent", "maybe")
+    agent._on_task_complete_handlers["causal_validation"](call)
+
     assert len(store.results) == 1
     persisted = result_mapping(store.results[0][1])
-    assert persisted["satisfaction"] == 2
     assert persisted["reason_code"] == "tracking_effort"
-    assert persisted["follow_up_allowed"] is True
+    assert persisted["return_intent"] == "maybe"
     assert call.get_variable("dailyfuel_result_saved") is True
     assert any(isinstance(command, SendInstructionCommand) for command in call._command_queue)
+
+
+def test_configured_offer_is_presented_only_when_price_is_causal() -> None:
+    offer = {"label": "one free month", "months": 1}
+
+    store = FakeStore()
+    agent = build_agent(store, "attempt-1", offer=offer)
+    call = MockCall()
+    call.set_field("reason_code", "price")
+    call.set_field("return_intent", "yes")
+    agent._on_task_complete_handlers["causal_validation"](call)
+
+    offer_task = task_commands(call)[-1]
+    assert offer_task.task_id == "offer"
+    assert "one free month" in offer_task.action_items[0].question
+
+    other = FakeStore()
+    other_agent = build_agent(other, "attempt-1", offer=offer)
+    other_call = MockCall()
+    other_call.set_field("reason_code", "tracking_effort")
+    other_call.set_field("return_intent", "yes")
+    other_agent._on_task_complete_handlers["causal_validation"](other_call)
+
+    assert not task_commands(other_call)
+
+
+def test_price_barrier_asks_the_price_specific_validation_question() -> None:
+    store = FakeStore()
+    agent = build_agent(store, "attempt-1", offer={"label": "one free month", "months": 1})
+    call = MockCall()
+    call.set_field("reason_code", "price")
+
+    agent._on_task_complete_handlers["interview"](call)
+
+    validation_task = task_commands(call)[-1]
+    assert validation_task.task_id == "causal_validation"
+    assert "cost less" in validation_task.action_items[0].question.casefold()
 
 
 def test_session_end_persists_partial_without_call_commands() -> None:

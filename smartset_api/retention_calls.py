@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from care_signal.schemas import (
+from smartset_api.schemas import (
     InsightAnswer,
     RetentionCallCreate,
     WorkflowInterpretation,
@@ -45,7 +45,9 @@ class RetentionCallProcess:
     def status(self) -> str:
         return_code = self.process.poll()
         if return_code is None:
-            return "starting" if time.monotonic() - self.started_at < 2 else "in_progress"
+            return (
+                "starting" if time.monotonic() - self.started_at < 2 else "in_progress"
+            )
         return "completed" if return_code == 0 else "failed"
 
     def events(self, cursor: int = 0) -> tuple[list[dict[str, object]], int]:
@@ -80,26 +82,51 @@ def _dotenv_values(path: Path) -> dict[str, str]:
     return values
 
 
-def retention_runtime_env() -> dict[str, str]:
+def _engine_env() -> dict[str, str]:
+    """Process environment, with untracked retention_engine/.env filling the gaps."""
+
     env = os.environ.copy()
     for key, value in _dotenv_values(ENGINE_ENV).items():
         if value and not env.get(key):
             env[key] = value
+    return env
 
-    missing = [key for key in ("GUAVA_AGENT_NUMBER", "DEMO_TARGET_PHONE") if not env.get(key)]
-    if missing:
-        raise RuntimeError(f"missing retention call configuration: {', '.join(missing)}")
+
+def _call_blockers(env: dict[str, str]) -> list[str]:
+    blockers: list[str] = []
     for key in ("GUAVA_AGENT_NUMBER", "DEMO_TARGET_PHONE"):
-        if not E164.fullmatch(env[key]):
-            raise RuntimeError(f"{key} must be an E.164 phone number")
+        value = env.get(key)
+        if not value:
+            blockers.append(f"{key} is not configured")
+        elif not E164.fullmatch(value):
+            blockers.append(f"{key} must be an E.164 phone number")
     if not ENGINE_PYTHON.is_file():
-        raise RuntimeError("retention_engine virtual environment is not installed")
+        blockers.append("retention_engine virtual environment is not installed")
+    return blockers
+
+
+def retention_call_readiness() -> tuple[bool, list[str]]:
+    """Check whether a live call could start. Never dials and never raises."""
+
+    blockers = _call_blockers(_engine_env())
+    return not blockers, blockers
+
+
+def retention_runtime_env() -> dict[str, str]:
+    env = _engine_env()
+    blockers = _call_blockers(env)
+    if blockers:
+        raise RuntimeError("; ".join(blockers))
+    # The engine subprocess only places the call. Anthropic credentials stay in this
+    # process so the agent cannot reach the model API on its own.
     env.pop("ANTHROPIC_API_KEY", None)
     env.pop("ANTHROPIC_MODEL", None)
     return env
 
 
-def start_retention_call(payload: RetentionCallCreate) -> tuple[str, RetentionCallProcess]:
+def start_retention_call(
+    payload: RetentionCallCreate,
+) -> tuple[str, RetentionCallProcess]:
     """Spawn one Guava call. The recipient can only come from DEMO_TARGET_PHONE."""
 
     env = retention_runtime_env()
@@ -152,10 +179,7 @@ def start_retention_call(payload: RetentionCallCreate) -> tuple[str, RetentionCa
 
 
 def interpret_workflow(instruction: str) -> WorkflowInterpretation:
-    env = os.environ.copy()
-    for key, value in _dotenv_values(ENGINE_ENV).items():
-        if value and not env.get(key):
-            env[key] = value
+    env = _engine_env()
     api_key = env.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")
@@ -200,10 +224,7 @@ def interpret_workflow(instruction: str) -> WorkflowInterpretation:
 
 
 def ask_insights(question: str) -> InsightAnswer:
-    env = os.environ.copy()
-    for key, value in _dotenv_values(ENGINE_ENV).items():
-        if value and not env.get(key):
-            env[key] = value
+    env = _engine_env()
     api_key = env.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY is not configured")

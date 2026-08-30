@@ -1,91 +1,100 @@
-# CareSignal
+# Smartset Retention Engine
 
-CareSignal turns an anonymous room bell into a structured, acknowledged request, so care teams know why a resident called before they walk to the room.
+Smartset is a fictional subscription nutrition tracker built for Guava Build Night SF. When a
+customer cancels or their usage drops off, Smartset places a real outbound Guava call, runs a
+short adaptive conversation, and turns what the person actually says into a structured retention
+decision.
 
-The hackathon demo is intentionally narrow and end to end:
+The point of the demo is that the conversation is **not** a script. The agent has to discover the
+customer's own goal, find out whether that goal still matters, locate the real barrier, and prove
+the barrier is causal before any incentive is allowed to exist.
 
 ```text
-phone as room button → real Guava call → structured intake
-→ deterministic safety override → SQLite → live care-team dashboard
+natural-language workflow edit → Claude rewrites the branch
+→ real Guava call → goal → still relevant? → root barrier → causal check
+→ gated offer → email
 ```
 
-It is a workflow-routing prototype, not a diagnostic or autonomous clinical-triage system. Only verified facility questions can be answered without staff; unclear or potentially clinical requests fail open to immediate human review.
+## The call flow
 
-## Current setup status
+Each stage is its own Guava task, and every transition is a decision in our code, not a prompt
+the model is free to reinterpret.
 
-- Guava CLI `0.40.0` is installed and authenticated on this laptop.
-- Backend, dashboard, mobile room interface, synthetic demo data, and the Guava agent are implemented.
-- Local tests and production frontend build pass.
-- Guava currently returns `package_setup_unfinished`, so organization access and an inbound number remain blocked until the account package is enabled in the Guava dashboard or by the event team.
+| Stage | What the agent must establish |
+| --- | --- |
+| `reach_person` | The right person is on the line. Voicemail hangs up. |
+| `permission` | Explicit consent, after disclosing that this is an AI and may be transcribed. |
+| `goal_discovery` | What the customer originally wanted, in their own words. Nothing is suggested to them. |
+| `goal_relevance` | Whether that goal still matters today. |
+| `goal_changed` | If it does not: understand what changed, then end. No retention attempt. |
+| `interview` | One open question to find the real barrier. The reason code is inferred silently. |
+| `causal_validation` | Whether removing that barrier would actually change their intent. |
+| `offer` | Only reachable when a workflow edit configured an offer, the barrier is price, and intent is positive. |
 
-The event handout's `python agent.py` command is stale for the current CLI. This project uses `main.py` inside `agent/` and runs it with `guava run agent`.
+Two deliberate constraints:
 
-## One-time setup
+- The customer's stored goal is removed from model context before the call. If the fixture goal
+  stayed in context, the agent could recite it and the discovery step would be theatre.
+- The offer gate is evaluated in Python, not by the model. A model that wants to offer a discount
+  when price was never the barrier is overruled.
+
+## Layout
+
+```text
+retention_engine/   Guava agent, call flow, reason taxonomy, SQLite persistence, CLI
+smartset_api/       FastAPI: workflow interpretation, call start, live events, insight questions
+web/                React dashboard, workflow canvas, live transcript and agent state
+```
+
+`smartset_api` never dials anyone itself. It spawns `retention_engine.main call-context` as a
+subprocess with the `--authorized-live-demo` guard and reads back the JSONL event log that the
+frontend polls.
+
+## Setup
+
+Prerequisites: Python 3.11+, `uv`, Node 20+, a Guava CLI login with package setup completed, and
+a provisioned Guava outbound number.
 
 ```bash
 make setup
+cp retention_engine/.env.example retention_engine/.env
 ```
 
-Then resolve the external Guava account step:
-
-```bash
-guava org list
-guava numbers list
-```
-
-If either command returns `package_setup_unfinished`, finish the package setup at [app.goguava.ai](https://app.goguava.ai) or take it directly to the Guava office-hours desk. Do not purchase a number until the event team confirms whether one is included.
-
-Once a number exists, add it to the already-created `.env` file:
+Fill in `retention_engine/.env`. It is untracked and it is the only place real values belong:
 
 ```dotenv
-GUAVA_AGENT_NUMBER=+1...
+GUAVA_AGENT_NUMBER=+1...      # your Guava outbound number
+DEMO_TARGET_PHONE=+1...       # the one number that consented to be called
+ANTHROPIC_API_KEY=sk-ant-...  # workflow edits and insight answers
+RESEND_API_KEY=re_...         # optional, sends the offer email
+DEMO_EMAIL_TO=you@example.com # optional, recipient for that email
 ```
 
-The ignored local `.env` already contains a random demo token. If recreating it from `.env.example`, replace the placeholder with a random value, for example from `uuidgen`. The token protects transcripts and write controls while the resident page is exposed on venue Wi-Fi; it is a demo boundary, not production authentication.
-
-## Run the complete demo
-
-After the number is configured:
+## Run
 
 ```bash
-make demo
+make serve   # backend plus the built frontend on http://127.0.0.1:8000
 ```
 
-That command builds the web app, resets synthetic demo data, starts the local dashboard, then listens for inbound calls through Guava. Open:
-
-- Care-team dashboard: use the tokenized URL printed by the start script
-- Room device: `http://<laptop-LAN-IP>:8000/resident`
-
-Find the laptop's Wi-Fi address on macOS with:
+For hot reload, run the backend and Vite side by side:
 
 ```bash
-ipconfig getifaddr en0
+make dev
+npm --prefix web run dev   # http://127.0.0.1:5173, proxies /api to port 8000
 ```
 
-The phone and laptop must be on the same local network only to load the room page. Tapping the button opens the native dialer; the actual voice path is a real telephone call.
+`GET /api/health` reports `callReady` and lists what is still missing, so you can confirm the
+demo is wired up without calling anyone.
 
-Press `Ctrl-C` once to stop both the agent and dashboard.
+## The two-minute demo
 
-## Develop without the phone number
-
-Use two terminals. First start the dashboard:
-
-```bash
-make seed
-make serve
-```
-
-`make serve` loads `.env`, binds only to localhost, and prints the secured dashboard URL. The agent targets below load the same token before they connect to the API.
-
-Then use Guava terminal chat or browser voice:
-
-```bash
-make agent-chat
-# or
-make agent-webrtc
-```
-
-The Guava account package still has to be active for cloud-backed voice and chat sessions.
+1. Open **Why customers churn** and type a workflow edit, for example
+   `Only offer one free month if price is the actual problem`.
+2. Claude rewrites the branch and the new gate appears in the canvas.
+3. Press **Call** on a customer. That places one real Guava call to `DEMO_TARGET_PHONE`.
+4. Transcript, agent state, and the highlighted workflow path update live from the call's events.
+5. Say price is the problem and that a lower price would bring you back: the offer is presented
+   and, on acceptance, emailed. Say anything else: no offer is ever mentioned.
 
 ## Verify
 
@@ -93,25 +102,22 @@ The Guava account package still has to be active for cloud-backed voice and chat
 make test
 ```
 
-The high-value safety cases cover red-flag overrides, low confidence, unknown information, human requests, status progression, logbook approval, API persistence, the exact Guava payload, and frontend serving.
+Builds the frontend, lints the API, then runs the engine's tests: normalization, the consent
+gate, goal discovery, the obsolete-goal exit, causal validation before persistence, the
+price-only offer gate, partial persistence on hangup, and the refusal of medical and account
+questions.
 
-## Repository map
+## Calling people responsibly
 
-```text
-agent/                    Guava 0.40 voice agent and allowlisted facility facts
-care_signal/              FastAPI, SQLite, routing policy, and demo data
-web/                      React/Tailwind dashboard and mobile call button
-tests/                    API and deterministic safety-policy tests
-docs/PRODUCT_BRIEF.md     Scope, risks, non-goals, and post-demo roadmap
-docs/DEMO_RUNBOOK.md      Two-minute script, test phrases, and failure plan
-docs/HACKATHON_NOTES.md   Schedule, rules, judging, and current account status
-scripts/start_demo.sh     One-command live demo
-```
+`contacts.demo.csv` is fictional and uses reserved, non-dialable numbers. The one fixture marked
+as consented exists to exercise the software gate; it is not evidence of real consent. A live
+call requires an eligible contact, a runtime target number, and the explicit
+`--authorized-live-demo` flag. Disclose that the caller is an AI, honor do-not-call immediately,
+and follow the rules that apply where the caller and the recipient are.
 
 ## Guava references
 
-- [Current quickstart](https://goguava.ai/docs/quickstart)
+- [Quickstart](https://goguava.ai/docs/quickstart)
 - [Agent API](https://goguava.ai/docs/agent)
 - [Structured tasks](https://goguava.ai/docs/tasks)
-- [Inbound architecture](https://goguava.ai/docs/architecture-overview)
 - [Language mode limitations](https://goguava.ai/docs/set-language-mode)

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "care-signal"
+name = "smartset-api"
 version = "0.1.0"
-description = "CareSignal voice request-routing demo for Guava Build Night"
+description = "Smartset retention API for the Guava Build Night demo"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115,<1",
@@ -20,11 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-care-signal = "care_signal.__main__:main"
+smartset-api = "smartset_api.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["care_signal"]
-
-[tool.pytest.ini_options]
-addopts = "-q"
-testpaths = ["tests"]
+packages = ["smartset_api"]
