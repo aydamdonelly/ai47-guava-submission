@@ -473,8 +473,11 @@ def build_agent(
         organization="Smartset",
         purpose=(
             "Conduct an optional two-minute product-research interview about Smartset. "
-            f"Be neutral and concise. {offer_policy} Never pressure the caller or give medical, "
-            "health, diet, calorie, or nutrition advice."
+            f"Be neutral and concise. {offer_policy} After each answer, move directly to the "
+            "next workflow question. Never announce preparation, processing, note-taking, or "
+            "waiting, and never say 'let me get things ready', 'one moment', or similar "
+            "transition filler. Never pressure the caller or give medical, health, diet, "
+            "calorie, or nutrition advice."
         ),
     )
 
