@@ -1,10 +1,9 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Bot, CheckCircle2, GitBranch, PhoneCall, ShieldCheck, SlidersHorizontal } from "lucide-react";
 import { AgentChecksPanel, AgentStatePanel, ChatFencerPanel, NodeDetailsPanel } from "../components/AgentInspectors";
 import type { AgentCheck, AgentState } from "../components/AgentInspectors";
 import { CallsView } from "../components/CallsView";
 import type { LiveCallRecord } from "../components/CallsView";
-import { CallView } from "../components/CallView";
 import { ChatWorkspace } from "../components/ChatWorkspace";
 import type { WorkflowRunStage } from "../components/ChatWorkspace";
 import { CustomerDrawer } from "../components/CustomerDrawer";
@@ -13,6 +12,7 @@ import { InsightsView } from "../components/InsightsView";
 import { Sidebar } from "../components/Sidebar";
 import type { AppView, WorkflowId } from "../components/Sidebar";
 import { WorkflowCanvas } from "../components/WorkflowCanvas";
+import { startCall } from "../lib/callAdapter";
 import { cn } from "../lib/cn";
 import { ammarCustomer, smartsetCustomers } from "../product/fixtures";
 import type { CallEvent, Customer, Workflow } from "../product/types";
@@ -89,10 +89,10 @@ export function RetentionApp() {
   const [customers, setCustomers] = useState<readonly Customer[]>(smartsetCustomers);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
-  const [callCustomer, setCallCustomer] = useState<Customer | null>(null);
-  const [callOpen, setCallOpen] = useState(false);
   const [latestCall, setLatestCall] = useState<LiveCallRecord>();
   const [liveCallCompleted, setLiveCallCompleted] = useState(false);
+  const activeCallCustomerRef = useRef<Customer | null>(null);
+  const callSessionRef = useRef<ReturnType<typeof startCall> | null>(null);
 
   const workflow = useMemo<Workflow>(() => {
     const base = workflowById[workflowId];
@@ -183,14 +183,20 @@ export function RetentionApp() {
   }
 
   function startCustomerCall(customer: Customer) {
-    setCallCustomer(customer);
-    setCallOpen(true);
+    if (callSessionRef.current) return;
+    activeCallCustomerRef.current = customer;
     setWorkflowId("churn");
     setView("analysis");
-    setActiveNodeId(undefined);
-    setRunStage("idle");
+    setActiveNodeId("select_users");
+    setRunStage("select_users");
     setAgentState({});
     setInspectorTab("state");
+
+    const session = startCall(customer, onCallEvent, { workflowRule });
+    callSessionRef.current = session;
+    void session.finished.finally(() => {
+      if (callSessionRef.current === session) callSessionRef.current = null;
+    });
   }
 
   const onCallEvent = useCallback((event: CallEvent) => {
@@ -203,7 +209,7 @@ export function RetentionApp() {
       setActiveNodeId(event.state.activeNodeId);
       setRunStage("calling");
       setLatestCall({
-        name: callCustomer?.name ?? "Sample customer",
+        name: activeCallCustomerRef.current?.name ?? "Sample customer",
         status: "In progress",
         branch: "Listening",
         outcome: "Live conversation",
@@ -259,8 +265,10 @@ export function RetentionApp() {
     if (event.type === "action_taken") {
       setLatestCall((current) => current ? { ...current, outcome: event.action.label } : current);
     }
+    const callCustomer = activeCallCustomerRef.current;
     if (event.type === "call_completed" && callCustomer) {
       const failed = event.metrics.some((metric) => metric.value === "Failed");
+      setRunStage("idle");
       setLatestCall((current) => current ? {
         ...current,
         status: failed ? "Failed" : "Completed",
@@ -289,7 +297,7 @@ export function RetentionApp() {
         ),
       );
     }
-  }, [callCustomer]);
+  }, []);
 
   const inspectorTabs: Array<{ id: InspectorTab; label: string; icon: typeof Bot }> = [
     { id: "state", label: "Agent state", icon: SlidersHorizontal },
@@ -458,13 +466,6 @@ export function RetentionApp() {
         onCall={startCustomerCall}
       />
 
-      <CallView
-        customer={callCustomer}
-        open={callOpen}
-        onOpenChange={setCallOpen}
-        onEvent={onCallEvent}
-        workflowRule={workflowRule}
-      />
     </div>
   );
 }
