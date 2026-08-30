@@ -187,13 +187,13 @@ def interpret_workflow(instruction: str) -> WorkflowInterpretation:
     body = json.dumps(
         {
             "model": env.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514"),
-            "max_tokens": 250,
+            "max_tokens": 1024,
             "system": (
                 "Convert a Smartset retention-workflow edit into JSON only. Return exactly "
                 "{summary, offerLabel, offerMonths, condition}. offerMonths must be 0 or 1. "
-                "Use 1 only for an explicitly requested one-free-month offer; otherwise 0 and "
-                "offerLabel null. Conditions must require a confirmed causal root reason and "
-                "must avoid premature incentives."
+                "Use 1 for an explicitly requested free month or free-trial-month offer; "
+                "otherwise 0 and offerLabel null. Conditions must require a confirmed causal "
+                "root reason and must avoid premature incentives."
             ),
             "messages": [{"role": "user", "content": instruction}],
         }
