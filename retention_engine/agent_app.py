@@ -131,10 +131,18 @@ def extract_interview_fields(
         _field_value(source, "satisfaction"),
         ("1", "2", "3", "4", "5"),
     )
-    reason_code = normalize_choice(
-        _field_value(source, "reason_code"),
-        REASON_CODES,
-        default="unknown",
+    goal_relevant = normalize_choice(
+        _field_value(source, "goal_relevant"),
+        ("yes", "no"),
+    )
+    reason_code = (
+        "goal_changed"
+        if goal_relevant == "no"
+        else normalize_choice(
+            _field_value(source, "reason_code"),
+            REASON_CODES,
+            default="unknown",
+        )
     )
     return_intent = normalize_choice(
         _field_value(source, "return_intent"),
@@ -149,7 +157,9 @@ def extract_interview_fields(
 
     return {
         "satisfaction": int(satisfaction_value) if satisfaction_value else None,
-        "primary_reason_words": normalize_text(_field_value(source, "primary_reason_words")),
+        "primary_reason_words": normalize_text(
+            _field_value(source, "primary_reason_words")
+        ) or normalize_text(_field_value(source, "goal_change_reason")),
         "reason_code": reason_code,
         "biggest_friction": normalize_text(_field_value(source, "biggest_friction")),
         "desired_change": normalize_text(_field_value(source, "desired_change")),
@@ -243,7 +253,7 @@ def _start_permission(call: guava.Call) -> None:
                 field_type="multiple_choice",
                 choices=["yes", "no"],
                 question=(
-                    "This call may be transcribed. Can I ask two quick questions about "
+                    "This call may be transcribed. Can I ask a few quick questions about "
                     "Smartset? You can stop at any time."
                 ),
             ),
@@ -255,30 +265,95 @@ def _start_permission(call: guava.Call) -> None:
     )
 
 
+def _start_goal_discovery(call: guava.Call) -> None:
+    _set_stage(call, "goal_discovery")
+    call.set_task(
+        "goal_discovery",
+        objective=(
+            "Ask one open-ended question to understand what the caller personally hoped to "
+            "achieve when they first started using Smartset. Use their natural answer; do not "
+            "suggest categories, infer the answer from stored customer context, or turn it into "
+            "a multiple-choice survey."
+        ),
+        checklist=[
+            guava.Field(
+                key="original_goal_words",
+                field_type="text",
+                question=(
+                    "When you first started using Smartset, what were you hoping to achieve?"
+                ),
+                description="Capture the caller's goal closely in their own words.",
+                required=False,
+            ),
+        ],
+        completion_criteria=(
+            "Finish after the caller answers, skips, or declines. Ask at most one brief neutral "
+            "clarification if the answer is unclear."
+        ),
+    )
+
+
+def _start_goal_relevance(call: guava.Call) -> None:
+    _set_stage(call, "goal_relevance")
+    call.set_task(
+        "goal_relevance",
+        objective=(
+            "Refer naturally to the goal the caller just described, then explicitly ask whether "
+            "that same goal is still relevant today. Capture only a clear yes or no. Do not "
+            "persuade them or assume that the goal still matters."
+        ),
+        checklist=[
+            guava.Field(
+                key="goal_relevant",
+                field_type="multiple_choice",
+                choices=["yes", "no"],
+                question="Is that goal still relevant to you today?",
+            ),
+        ],
+        completion_criteria=(
+            "Finish as soon as a clear yes or no is captured. If the caller is uncertain, ask "
+            "one short neutral clarification without steering the answer."
+        ),
+    )
+
+
+def _start_goal_changed(call: guava.Call) -> None:
+    _set_stage(call, "goal_changed")
+    call.set_task(
+        "goal_changed",
+        objective=(
+            "Respect that the caller's original goal no longer matters. Ask one optional, neutral "
+            "question to understand what changed, then end respectfully. Do not attempt retention, "
+            "offer an incentive, or pressure them to find a new goal."
+        ),
+        checklist=[
+            guava.Field(
+                key="goal_change_reason",
+                field_type="text",
+                question="If you are comfortable sharing, what changed for you?",
+                required=False,
+            ),
+        ],
+        completion_criteria=(
+            "Finish after one answer, skip, or decline. Never make a second retention attempt."
+        ),
+    )
+
+
 def _start_interview(call: guava.Call, trigger: object) -> None:
     _set_stage(call, "interview")
     call.set_task(
         "interview",
         objective=(
-            "Conduct a short, neutral product-research interview about the caller's experience "
-            "with Smartset. Ask each spoken question once and allow the caller to skip any "
-            "question or stop. Ask at most one short, neutral clarification when an answer is "
-            "unclear. Never defend the product, sell, persuade, propose an incentive, change an "
-            "account, or provide medical, health, diet, calorie, or nutrition advice. Never ask "
-            "about weight, diagnoses, medication, or eating behavior. Infer reason_code silently "
-            "from the caller's own words and never read the taxonomy aloud."
+            "Ask one neutral, open-ended question to identify the caller's actual primary "
+            "barrier to using Smartset. Allow them to skip or stop and ask at most one short "
+            "clarification. "
+            "Never defend the product, sell, persuade, propose an incentive, change an account, "
+            "or provide medical, health, diet, calorie, or nutrition advice. Never ask about "
+            "weight, diagnoses, medication, or eating behavior. Infer the internal reason code "
+            "and biggest friction silently from their own words; never read the taxonomy aloud."
         ),
         checklist=[
-            guava.Field(
-                key="satisfaction",
-                field_type="multiple_choice",
-                choices=["1", "2", "3", "4", "5"],
-                question=(
-                    "Overall, how satisfied were you with Smartset, from one to five, "
-                    "where five means very satisfied?"
-                ),
-                required=False,
-            ),
             guava.Field(
                 key="primary_reason_words",
                 field_type="text",
@@ -306,36 +381,44 @@ def _start_interview(call: guava.Call, trigger: object) -> None:
                 ),
                 required=False,
             ),
-            guava.Field(
-                key="desired_change",
-                field_type="text",
-                question="What one change would have made Smartset more useful for you?",
-                required=False,
-            ),
+        ],
+        completion_criteria=(
+            "Finish as soon as the root barrier is captured or skipped and the internal fields "
+            "are inferred. Do not add satisfaction, desired-change, or follow-up survey questions. "
+            "If the caller asks to stop, stop immediately."
+        ),
+    )
+
+
+def _start_causal_validation(call: guava.Call, reason_code: str) -> None:
+    _set_stage(call, "causal_validation")
+    if reason_code == "price":
+        question = "Would you continue using Smartset if it cost less?"
+        objective = (
+            "Validate whether price is truly causal. Ask the exact short question once and "
+            "capture yes, maybe, or no without mentioning an offer yet."
+        )
+    else:
+        question = "If that issue were resolved, would you consider using Smartset again?"
+        objective = (
+            "Validate whether resolving the caller's stated barrier would change their intent. "
+            "Ask one short question without selling or promising a solution."
+        )
+    call.set_task(
+        "causal_validation",
+        objective=objective,
+        checklist=[
             guava.Field(
                 key="return_intent",
                 field_type="multiple_choice",
                 choices=["yes", "maybe", "no", "unknown"],
-                question=(
-                    "If the issues you mentioned were fixed, would you consider using "
-                    "Smartset again?"
-                ),
-                required=False,
-            ),
-            guava.Field(
-                key="follow_up_allowed",
-                field_type="multiple_choice",
-                choices=["yes", "no"],
-                question=(
-                    "Would it be okay for the Smartset team to contact you once about "
-                    "this feedback?"
-                ),
+                question=question,
                 required=False,
             ),
         ],
         completion_criteria=(
-            "Finish after every spoken question has been answered once, skipped, or declined. "
-            "If the caller asks to stop, stop asking questions immediately."
+            "Finish immediately after one answer, skip, or decline. Do not ask any additional "
+            "research or follow-up-permission questions."
         ),
     )
 
@@ -405,6 +488,11 @@ def build_agent(
             "recent_weekly_events", _attempt_value(attempt, "recent_weekly_events")
         )
 
+        # The live conversation must discover the caller's goal from their own words.
+        # Keeping a fixture goal in model context would bias that answer and make the demo
+        # appear pre-scripted.
+        context.pop("original_goal", None)
+
         call.set_language_mode(primary="english")
         call.set_variable("dailyfuel_attempt_key", attempt_key)
         call.add_info("Known Smartset customer context", context)
@@ -451,7 +539,6 @@ def build_agent(
             default="unavailable",
         )
         if normalized == "available":
-            _emit(event_sink, "workflow_node_entered", workflowNodeId="infer_goal")
             _start_permission(call)
             return
 
@@ -472,10 +559,8 @@ def build_agent(
     @agent.on_task_complete("permission")
     def on_permission_complete(call: guava.Call) -> None:
         if permission_granted(call.get_field("interview_permission")):
-            attempt = store.get_attempt(attempt_key)
-            _emit(event_sink, "workflow_node_entered", workflowNodeId="goal_relevant")
-            _emit(event_sink, "workflow_node_entered", workflowNodeId="identify_barrier")
-            _start_interview(call, _attempt_value(attempt, "trigger"))
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="infer_goal")
+            _start_goal_discovery(call)
             return
 
         _set_stage(call, "declined")
@@ -484,11 +569,73 @@ def build_agent(
             "Thank them for their time, confirm that no interview will take place, and end."
         )
 
+    @agent.on_task_complete("goal_discovery")
+    def on_goal_discovery_complete(call: guava.Call) -> None:
+        customer_goal = normalize_text(call.get_field("original_goal_words"))
+        _emit(
+            event_sink,
+            "state_updated",
+            state={
+                "state": "thinking",
+                "activeNodeId": "infer_goal",
+                "customerGoal": customer_goal,
+                "followUpDepth": 0,
+            },
+        )
+        _emit(event_sink, "workflow_node_entered", workflowNodeId="goal_relevant")
+        _start_goal_relevance(call)
+
+    @agent.on_task_complete("goal_relevance")
+    def on_goal_relevance_complete(call: guava.Call) -> None:
+        customer_goal = normalize_text(call.get_field("original_goal_words"))
+        goal_relevant = permission_granted(call.get_field("goal_relevant"))
+        _emit(
+            event_sink,
+            "state_updated",
+            state={
+                "state": "thinking",
+                "activeNodeId": "goal_relevant",
+                "customerGoal": customer_goal,
+                "goalRelevant": goal_relevant,
+                "followUpDepth": 0,
+            },
+        )
+
+        if not goal_relevant:
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="goal_changed")
+            _start_goal_changed(call)
+            return
+
+        attempt = store.get_attempt(attempt_key)
+        _emit(event_sink, "workflow_node_entered", workflowNodeId="identify_barrier")
+        _start_interview(call, _attempt_value(attempt, "trigger"))
+
+    @agent.on_task_complete("goal_changed")
+    def on_goal_changed_complete(call: guava.Call) -> None:
+        customer_goal = normalize_text(call.get_field("original_goal_words"))
+        saved = _complete_result(store, attempt_key, call)
+        call.set_variable("dailyfuel_result_saved", saved)
+        _emit(
+            event_sink,
+            "state_updated",
+            state={
+                "state": "thinking",
+                "activeNodeId": "goal_changed",
+                "customerGoal": customer_goal,
+                "goalRelevant": False,
+                "barrier": "goal_changed",
+                "followUpDepth": 0,
+            },
+        )
+        _set_stage(call, "closing")
+        call.hangup(
+            "Thank them for explaining, confirm that you will not push them to return, and say "
+            "goodbye. Do not present an offer."
+        )
+
     @agent.on_task_complete("interview")
     def on_interview_complete(call: guava.Call) -> None:
         fields = extract_interview_fields(call)
-        saved = _complete_result(store, attempt_key, call)
-        call.set_variable("dailyfuel_result_saved", saved)
         reason_code = normalize_text(fields.get("reason_code")) or "unknown"
         node_by_reason = {
             "price": "price",
@@ -505,22 +652,47 @@ def build_agent(
             state={
                 "state": "thinking",
                 "activeNodeId": active_node,
-                "goalRelevant": True,
+                "customerGoal": normalize_text(call.get_field("original_goal_words")),
+                "goalRelevant": permission_granted(call.get_field("goal_relevant")),
                 "barrier": reason_code,
                 "followUpDepth": 0,
             },
         )
+        if reason_code == "price":
+            _emit(event_sink, "workflow_node_entered", workflowNodeId="price_causal")
+        _start_causal_validation(call, reason_code)
+
+    @agent.on_task_complete("causal_validation")
+    def on_causal_validation_complete(call: guava.Call) -> None:
+        fields = extract_interview_fields(call)
+        saved = _complete_result(store, attempt_key, call)
+        call.set_variable("dailyfuel_result_saved", saved)
+        reason_code = normalize_text(fields.get("reason_code")) or "unknown"
+        return_intent = normalize_text(fields.get("return_intent"))
+
+        if reason_code == "price":
+            _emit(
+                event_sink,
+                "state_updated",
+                state={
+                    "state": "thinking",
+                    "activeNodeId": "price_causal",
+                    "customerGoal": normalize_text(call.get_field("original_goal_words")),
+                    "goalRelevant": permission_granted(call.get_field("goal_relevant")),
+                    "barrier": reason_code,
+                    "reengagementIntent": return_intent,
+                    "followUpDepth": 0,
+                },
+            )
 
         offer_label = normalize_text((offer or {}).get("label"))
         offer_months = (offer or {}).get("months")
-        return_intent = normalize_text(fields.get("return_intent"))
         if (
             offer_label
             and offer_months == 1
             and reason_code == "price"
             and return_intent in {"yes", "maybe"}
         ):
-            _emit(event_sink, "workflow_node_entered", workflowNodeId="price_causal")
             _emit(event_sink, "workflow_node_entered", workflowNodeId="offer")
             _start_offer(call, offer_label)
             return
@@ -573,7 +745,6 @@ def build_agent(
 
     @agent.on_question
     def on_question(call: guava.Call, question: str) -> str:
-        del call
         normalized = question.casefold()
         advice_terms = (
             "medical",
@@ -591,9 +762,24 @@ def build_agent(
                 "I can't provide medical or nutrition advice. I'm only here to collect "
                 "product feedback about Smartset."
             )
+        offer_label = normalize_text((offer or {}).get("label"))
+        offer_terms = ("offer", "discount", "price", "pricing", "free", "month")
+        if offer_label and any(term in normalized for term in offer_terms):
+            return (
+                f"There is a configured {offer_label} option. I first need to confirm whether "
+                "price is the actual reason you stopped and whether a lower price would bring "
+                "you back. If both are true, I can offer it during this call."
+            )
+        del call
         return (
             "This is an optional two-minute product-research interview for Smartset. "
-            "I can't access or change your account. You can skip a question or stop at any time."
+            + (
+                "I can present the configured retention offer if its workflow conditions are "
+                "met, but I can't make other account changes. "
+                if offer_label
+                else "I can't access or change your account. "
+            )
+            + "You can skip a question or stop at any time."
         )
 
     @agent.on_session_end
@@ -601,7 +787,14 @@ def build_agent(
         stage = normalize_text(call.get_variable("dailyfuel_stage"))
         already_saved = call.get_variable("dailyfuel_result_saved", False) is True
 
-        if stage in {"interview", "closing"} and not already_saved:
+        if stage in {
+            "goal_discovery",
+            "goal_relevance",
+            "goal_changed",
+            "interview",
+            "causal_validation",
+            "closing",
+        } and not already_saved:
             _complete_result(store, attempt_key, call)
         elif stage == "permission":
             _set_status(store, attempt_key, "declined")

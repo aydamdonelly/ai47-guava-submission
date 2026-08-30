@@ -20,28 +20,6 @@ import { workflowById } from "../product/workflows";
 
 type InspectorTab = "state" | "checks" | "fencer" | "decision" | "node";
 
-const initialState: AgentState = {
-  customerGoal: "Lose weight",
-  satisfaction: "7 / 10",
-  goalRelevance: "High",
-  primaryBarrier: "Habit broken",
-  reengagementIntent: "Medium",
-  priceSensitivity: "Low",
-  productIssue: "None detected",
-  confidence: 0.86,
-};
-
-const completedChecks: readonly AgentCheck[] = [
-  { label: "Original goal identified", passed: true },
-  { label: "Root cause identified", passed: true },
-  { label: "No premature incentive offered", passed: true },
-  { label: "Customer intent understood", passed: true },
-  { label: "Correct branch selected", passed: true },
-  { label: "Next action completed", passed: true },
-  { label: "Opt-out respected", passed: true },
-  { label: "Structured outcome saved", passed: true },
-];
-
 const fencerRules: readonly AgentCheck[] = [
   { label: "Never shame the customer", passed: true },
   { label: "Never pressure the customer to continue", passed: true },
@@ -95,8 +73,8 @@ function DecisionEnginePanel() {
 export function RetentionApp() {
   const [view, setView] = useState<AppView>("analysis");
   const [workflowId, setWorkflowId] = useState<WorkflowId>("churn");
-  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>("start");
-  const [activeNodeId, setActiveNodeId] = useState<string | undefined>("start");
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>();
+  const [activeNodeId, setActiveNodeId] = useState<string | undefined>();
   const [emphasizedNodeId, setEmphasizedNodeId] = useState<string | undefined>();
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("state");
   const [commandConfirmation, setCommandConfirmation] = useState<string>();
@@ -106,8 +84,8 @@ export function RetentionApp() {
     offerMonths: number;
     condition: string;
   }>();
-  const [runStage, setRunStage] = useState<WorkflowRunStage>("start");
-  const [agentState, setAgentState] = useState<AgentState>(initialState);
+  const [runStage, setRunStage] = useState<WorkflowRunStage>("idle");
+  const [agentState, setAgentState] = useState<AgentState>({});
   const [customers, setCustomers] = useState<readonly Customer[]>(smartsetCustomers);
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -164,10 +142,11 @@ export function RetentionApp() {
     setView("analysis");
     setCommandConfirmation(undefined);
     setWorkflowRule(undefined);
-    setRunStage("start");
+    setRunStage("idle");
     setEmphasizedNodeId(undefined);
     setActiveNodeId(undefined);
-    setSelectedNodeId(workflowById[id].nodes[0]?.id);
+    setSelectedNodeId(undefined);
+    setAgentState({});
     setInspectorTab("decision");
   }
 
@@ -208,14 +187,21 @@ export function RetentionApp() {
     setCallOpen(true);
     setWorkflowId("churn");
     setView("analysis");
-    setActiveNodeId("outbound_call");
+    setActiveNodeId(undefined);
+    setRunStage("idle");
+    setAgentState({});
     setInspectorTab("state");
   }
 
   const onCallEvent = useCallback((event: CallEvent) => {
-    if (event.type === "workflow_node_entered") setActiveNodeId(event.workflowNodeId);
+    if (event.type === "workflow_node_entered") {
+      setActiveNodeId(event.workflowNodeId);
+      if (event.workflowNodeId === "select_users") setRunStage("select_users");
+      if (event.workflowNodeId === "outbound_call") setRunStage("calling");
+    }
     if (event.type === "call_started") {
       setActiveNodeId(event.state.activeNodeId);
+      setRunStage("calling");
       setLatestCall({
         name: callCustomer?.name ?? "Sample customer",
         status: "In progress",
@@ -227,17 +213,38 @@ export function RetentionApp() {
     }
     if (event.type === "state_updated" || event.type === "call_completed") {
       const snapshot = event.state;
-      setActiveNodeId(snapshot.activeNodeId);
-      setAgentState((current) => ({
-        ...current,
-        customerGoal: snapshot.goalRelevant ? "Lose weight" : current.customerGoal,
-        goalRelevance: snapshot.goalRelevant === false ? "Low" : "High",
-        primaryBarrier: snapshot.barrier === "tracking_effort" ? "Habit broken" : current.primaryBarrier,
-        satisfaction: snapshot.barrier === "tracking_effort" ? "8 / 10" : current.satisfaction,
-        reengagementIntent: snapshot.state === "completed" ? "High" : current.reengagementIntent,
-        priceSensitivity: snapshot.barrier === "tracking_effort" ? "Low" : current.priceSensitivity,
-        confidence: snapshot.state === "completed" ? 0.94 : 0.88,
-      }));
+      const failed = event.type === "call_completed" && event.metrics.some((metric) => metric.value === "Failed");
+      if (failed) {
+        setActiveNodeId(undefined);
+        setRunStage("idle");
+      } else {
+        setActiveNodeId(snapshot.activeNodeId);
+        setAgentState((current) => ({
+          ...current,
+          ...(snapshot.customerGoal !== undefined ? { customerGoal: snapshot.customerGoal } : {}),
+          ...(snapshot.satisfaction !== undefined ? { satisfaction: snapshot.satisfaction } : {}),
+          ...(snapshot.goalRelevance !== undefined
+            ? { goalRelevance: snapshot.goalRelevance }
+            : snapshot.goalRelevant !== undefined
+              ? { goalRelevance: snapshot.goalRelevant ? "Relevant" : "Not relevant" }
+              : {}),
+          ...(snapshot.primaryBarrier !== undefined
+            ? { primaryBarrier: snapshot.primaryBarrier }
+            : snapshot.barrier !== undefined
+              ? { primaryBarrier: snapshot.barrier }
+              : {}),
+          ...(snapshot.reengagementIntent !== undefined
+            ? { reengagementIntent: snapshot.reengagementIntent }
+            : {}),
+          ...(snapshot.priceSensitivity !== undefined
+            ? { priceSensitivity: snapshot.priceSensitivity }
+            : snapshot.priceIsRootCause !== undefined
+              ? { priceSensitivity: snapshot.priceIsRootCause ? "root_cause" : "symptom" }
+              : {}),
+          ...(snapshot.productIssue !== undefined ? { productIssue: snapshot.productIssue } : {}),
+          ...(snapshot.confidence !== undefined ? { confidence: snapshot.confidence } : {}),
+        }));
+      }
       if (snapshot.barrier) {
         const branchByBarrier = {
           tracking_effort: "Habit / busy",
@@ -300,9 +307,11 @@ export function RetentionApp() {
         onWorkflowChange={chooseWorkflow}
         onAddWorkflow={() => {
           setView("analysis");
-          setRunStage("start");
+          setRunStage("idle");
           setCommandConfirmation("New workflow ready. Describe the cohort and desired outcome below.");
           setActiveNodeId(undefined);
+          setSelectedNodeId(undefined);
+          setAgentState({});
         }}
       />
 
@@ -318,12 +327,6 @@ export function RetentionApp() {
               onWorkflowSelect={chooseWorkflow}
               onCommand={runCommand}
               stage={runStage}
-              onStageChange={(stage) => {
-                setRunStage(stage);
-                setActiveNodeId(
-                  stage === "start" ? "start" : stage === "select_users" ? "select_users" : "outbound_call",
-                );
-              }}
               selectedTestCustomer={ammarCustomer}
               onCall={startCustomerCall}
               onFollowUp={(index) => {
@@ -404,7 +407,7 @@ export function RetentionApp() {
               <div className="h-[calc(100%-2.75rem)] overflow-y-auto p-3">
                 {inspectorTab === "state" && <AgentStatePanel state={agentState} />}
                 {inspectorTab === "decision" && <DecisionEnginePanel />}
-                {inspectorTab === "checks" && <AgentChecksPanel checks={completedChecks} />}
+                {inspectorTab === "checks" && <AgentChecksPanel checks={[]} />}
                 {inspectorTab === "fencer" && <ChatFencerPanel checks={fencerRules} />}
                 {inspectorTab === "node" && <NodeDetailsPanel node={selectedNode} />}
               </div>

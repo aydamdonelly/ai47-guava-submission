@@ -42,15 +42,6 @@ export function startCall(
     resolveFinished = resolve;
   });
 
-  onEvent({
-    type: "call_started",
-    timestamp: now(),
-    elapsedMs: 0,
-    customerId: customer.id,
-    workflowId: customer.segment,
-    state: { state: "agent_speaking", activeNodeId: "outbound_call", followUpDepth: 0 },
-  });
-
   function handleFailure(error: unknown) {
     if (stopped || (error instanceof DOMException && error.name === "AbortError")) return;
     const failed: CallEvent = {

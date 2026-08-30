@@ -217,6 +217,14 @@ export type CallState =
 export interface CallStateSnapshot {
   state: CallState;
   activeNodeId: string;
+  customerGoal?: CustomerGoal | string | null;
+  satisfaction?: number | null;
+  goalRelevance?: "relevant" | "not_relevant" | "unknown";
+  primaryBarrier?: BarrierId | string | null;
+  reengagementIntent?: "yes" | "maybe" | "no" | "unknown";
+  priceSensitivity?: "root_cause" | "symptom" | "not_mentioned" | "unknown";
+  productIssue?: string | null;
+  confidence?: number | null;
   goalRelevant?: boolean;
   barrier?: BarrierId;
   priceIsRootCause?: boolean;

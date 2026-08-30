@@ -11,13 +11,13 @@ const analyses: Array<{ id: WorkflowId; label: string }> = [
   { id: "reactivate", label: "Bring inactive users back" },
 ];
 
-export type WorkflowRunStage = "start" | "select_users" | "calling";
+export type WorkflowRunStage = "idle" | "select_users" | "calling";
 
-const runStages: ReadonlyArray<{ id: WorkflowRunStage; label: string }> = [
+const runStages = [
   { id: "start", label: "Start" },
   { id: "select_users", label: "Select users" },
   { id: "calling", label: "Start calling" },
-];
+] as const;
 
 function maskedPhone(phone: string) {
   const lastFour = phone.replace(/\D/g, "").slice(-4);
@@ -34,7 +34,6 @@ export function ChatWorkspace({
   onCommand,
   onFollowUp,
   stage,
-  onStageChange,
   selectedTestCustomer,
   onCall,
 }: {
@@ -47,12 +46,11 @@ export function ChatWorkspace({
   onCommand: (command: string) => void;
   onFollowUp: (index: number) => void;
   stage: WorkflowRunStage;
-  onStageChange: (stage: WorkflowRunStage) => void;
   selectedTestCustomer: Customer | null;
   onCall: (customer: Customer) => void;
 }) {
   const [input, setInput] = useState("");
-  const activeStageIndex = runStages.findIndex((item) => item.id === stage);
+  const activeStageIndex = stage === "idle" ? -1 : stage === "select_users" ? 1 : 2;
 
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -72,8 +70,14 @@ export function ChatWorkspace({
           <p className="text-xs text-slate-500">Updated just now · 24 customers in cohort</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="size-2 rounded-full bg-emerald-500" aria-hidden="true" />
-          Agent ready
+          <span
+            className={cn(
+              "size-2 rounded-full",
+              stage === "calling" ? "bg-emerald-500" : "bg-slate-300",
+            )}
+            aria-hidden="true"
+          />
+          {stage === "calling" ? "Live call" : "Agent ready"}
         </div>
       </header>
 
@@ -129,20 +133,25 @@ export function ChatWorkspace({
                     {runStages.map((item, index) => {
                       const completed = index < activeStageIndex;
                       const active = item.id === stage;
+                      const canStart = item.id === "start" && stage === "idle" && selectedTestCustomer;
                       return (
                         <li key={item.id}>
                           <button
                             type="button"
-                            onClick={() => onStageChange(item.id)}
+                            onClick={() => canStart && onCall(selectedTestCustomer)}
+                            disabled={!canStart}
                             aria-current={active ? "step" : undefined}
                             className={cn(
                               "flex min-h-10 w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600",
                               completed && "border-emerald-200 bg-emerald-50 text-emerald-800",
                               active && "border-emerald-500 bg-emerald-50 text-emerald-900",
-                              !completed && !active && "border-slate-200 text-slate-500 hover:border-slate-300",
+                              canStart && "border-slate-950 bg-slate-950 text-white hover:bg-slate-800",
+                              !completed && !active && !canStart && "border-slate-200 text-slate-400",
                             )}
                           >
-                            {completed ? (
+                            {canStart ? (
+                              <PhoneCall aria-hidden="true" className="size-4 shrink-0" />
+                            ) : completed ? (
                               <CheckCircle2 aria-hidden="true" className="size-4 shrink-0 text-emerald-600" />
                             ) : (
                               <Circle
@@ -170,14 +179,10 @@ export function ChatWorkspace({
                           Stored phone · {maskedPhone(selectedTestCustomer.phone)}
                         </span>
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => onCall(selectedTestCustomer)}
-                        className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-slate-950 px-3 py-2 text-xs font-medium text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-600 focus-visible:ring-offset-2"
-                      >
-                        <PhoneCall aria-hidden="true" className="size-3.5" />
-                        Live call
-                      </button>
+                      <span className="inline-flex shrink-0 items-center gap-1.5 text-xs font-medium text-emerald-700">
+                        <span className="size-1.5 rounded-full bg-emerald-500" aria-hidden="true" />
+                        Live via Guava
+                      </span>
                     </div>
                   )}
                 </section>
@@ -246,9 +251,8 @@ export function ChatWorkspace({
             className="block w-full resize-none border-0 bg-transparent px-3 py-2 text-sm text-slate-900 outline-none placeholder:text-slate-400"
           />
           <div className="flex items-center justify-between px-1 pb-1">
-            <span className="inline-flex items-center gap-1.5 px-2 text-[11px] font-medium text-slate-400">
-              <Check aria-hidden="true" className="size-3.5" />
-              Customer context loaded
+            <span className="px-2 text-[11px] font-medium text-slate-400">
+              Edit the workflow in natural language
             </span>
             <button
               type="submit"
